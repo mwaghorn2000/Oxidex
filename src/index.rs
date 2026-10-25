@@ -1,18 +1,48 @@
 struct Index {
+    // Lowercased names, used for matching.
     names: String,
+    // Original-case names, used for showing results. Kept separate because
+    // lowercasing can change byte length.
+    display_names: String,
     entries: Vec<Entry>,
 }
 
 pub struct Entry {
     name_start: u32,
     name_len: u16,
+    display_start: u32,
+    display_len: u16,
     parent: u32,
     is_dir: bool,
     size: u64,
     modifies: u64,
 }
 
+// Returned by `push` when a name is longer than `u16::MAX` bytes.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NameTooLong;
+
 impl Index {
+    pub fn new() -> Index {
+        todo!()
+    }
+
+    // Appends an entry and returns its ID. `parent` is `u32::MAX` for a root.
+    pub fn push(
+        &mut self,
+        _name: &str,
+        _parent: u32,
+        _is_dir: bool,
+        _size: u64,
+        _modified: u64,
+    ) -> Result<u32, NameTooLong> {
+        todo!()
+    }
+
+    pub fn display_name(&self, _id: u32) -> Option<&str> {
+        todo!()
+    }
+
     pub fn name(&self, id: u32) -> Option<&str> {
         let e = self.entries.get(id as usize)?;
         let start = e.name_start as usize;
@@ -39,20 +69,96 @@ mod tests {
     fn build(items: &[(&str, u32)]) -> Index {
         let mut index = Index {
             names: String::new(),
+            display_names: String::new(),
             entries: Vec::new(),
         };
         for &(name, parent) in items {
             index.entries.push(Entry {
                 name_start: index.names.len() as u32,
                 name_len: name.len() as u16,
+                display_start: index.display_names.len() as u32,
+                display_len: name.len() as u16,
                 parent,
                 is_dir: false,
                 size: 0,
                 modifies: 0,
             });
             index.names.push_str(name);
+            index.display_names.push_str(name);
         }
         index
+    }
+
+    // Tests below are for `new`, `push` and `display_name`, which are still
+    // stubs. Un-ignore each as it is implemented.
+
+    #[test]
+    #[ignore = "not implemented"]
+    fn new_index_is_empty() {
+        let index = Index::new();
+        assert_eq!(index.name(0), None);
+        assert_eq!(index.display_name(0), None);
+        assert_eq!(index.full_path(0), None);
+    }
+
+    #[test]
+    #[ignore = "not implemented"]
+    fn push_assigns_sequential_ids() {
+        let mut index = Index::new();
+        assert_eq!(index.push("c", u32::MAX, true, 0, 0), Ok(0));
+        assert_eq!(index.push("docs", 0, true, 0, 0), Ok(1));
+        assert_eq!(index.push("a.txt", 1, false, 10, 0), Ok(2));
+        assert_eq!(
+            index.full_path(2),
+            Some(Path::new("c").join("docs").join("a.txt"))
+        );
+    }
+
+    #[test]
+    #[ignore = "not implemented"]
+    fn name_is_lowercased() {
+        let mut index = Index::new();
+        let id = index.push("ReadMe.MD", u32::MAX, false, 0, 0).unwrap();
+        assert_eq!(index.name(id), Some("readme.md"));
+    }
+
+    #[test]
+    #[ignore = "not implemented"]
+    fn display_name_keeps_case() {
+        let mut index = Index::new();
+        let id = index.push("ReadMe.MD", u32::MAX, false, 0, 0).unwrap();
+        assert_eq!(index.display_name(id), Some("ReadMe.MD"));
+    }
+
+    // 'ẞ' is 3 bytes but lowercases to 2-byte 'ß'; 'İ' is 2 bytes but lowercases
+    // to 3 bytes ("i" + combining dot). Both buffers must stay in sync, and the
+    // entry pushed afterwards must not be shifted.
+    #[test]
+    #[ignore = "not implemented"]
+    fn lowercasing_that_changes_length() {
+        let mut index = Index::new();
+        let a = index.push("ẞig", u32::MAX, false, 0, 0).unwrap();
+        let b = index.push("İx", u32::MAX, false, 0, 0).unwrap();
+        let c = index.push("plain", u32::MAX, false, 0, 0).unwrap();
+        assert_eq!(index.name(a), Some("ßig"));
+        assert_eq!(index.display_name(a), Some("ẞig"));
+        assert_eq!(index.name(b), Some("i\u{307}x"));
+        assert_eq!(index.display_name(b), Some("İx"));
+        assert_eq!(index.name(c), Some("plain"));
+        assert_eq!(index.display_name(c), Some("plain"));
+    }
+
+    #[test]
+    #[ignore = "not implemented"]
+    fn push_rejects_name_over_u16_max() {
+        let mut index = Index::new();
+        index.push("ok", u32::MAX, false, 0, 0).unwrap();
+        let long = "x".repeat(u16::MAX as usize + 1);
+        assert_eq!(index.push(&long, u32::MAX, false, 0, 0), Err(NameTooLong));
+        // The failed push must not leave a partial entry or name behind.
+        assert_eq!(index.name(1), None);
+        assert_eq!(index.names, "ok");
+        assert_eq!(index.display_names, "ok");
     }
 
     #[test]
