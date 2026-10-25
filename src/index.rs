@@ -90,29 +90,6 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn build(items: &[(&str, u32)]) -> Index {
-        let mut index = Index {
-            names: String::new(),
-            display_names: String::new(),
-            entries: Vec::new(),
-        };
-        for &(name, parent) in items {
-            index.entries.push(Entry {
-                name_start: index.names.len() as u32,
-                name_len: name.len() as u16,
-                display_start: index.display_names.len() as u32,
-                display_len: name.len() as u16,
-                parent,
-                is_dir: false,
-                size: 0,
-                modifies: 0,
-            });
-            index.names.push_str(name);
-            index.display_names.push_str(name);
-        }
-        index
-    }
-
     #[test]
     fn new_index_is_empty() {
         let index = Index::new();
@@ -190,15 +167,19 @@ mod tests {
 
     #[test]
     fn name_returns_each_entry() {
-        let index = build(&[("ab", u32::MAX), ("c", u32::MAX), ("def", u32::MAX)]);
-        assert_eq!(index.name(0), Some("ab"));
-        assert_eq!(index.name(1), Some("c"));
-        assert_eq!(index.name(2), Some("def"));
+        let mut index = Index::new();
+        let a = index.push("ab", u32::MAX, false, 0, 0).unwrap();
+        let b = index.push("c", u32::MAX, false, 0, 0).unwrap();
+        let c = index.push("def", u32::MAX, false, 0, 0).unwrap();
+        assert_eq!(index.name(a), Some("ab"));
+        assert_eq!(index.name(b), Some("c"));
+        assert_eq!(index.name(c), Some("def"));
     }
 
     #[test]
     fn name_out_of_range_is_none() {
-        let index = build(&[("ab", u32::MAX)]);
+        let mut index = Index::new();
+        index.push("ab", u32::MAX, false, 0, 0).unwrap();
         assert_eq!(index.name(1), None);
         assert_eq!(index.name(u32::MAX - 1), None);
     }
@@ -206,42 +187,54 @@ mod tests {
     // Offsets are byte offsets, so multi-byte characters must not shift later names.
     #[test]
     fn name_handles_multibyte() {
-        let index = build(&[("café.txt", u32::MAX), ("next", u32::MAX)]);
-        assert_eq!(index.name(0), Some("café.txt"));
-        assert_eq!(index.name(1), Some("next"));
+        let mut index = Index::new();
+        let a = index.push("café.txt", u32::MAX, false, 0, 0).unwrap();
+        let b = index.push("next", u32::MAX, false, 0, 0).unwrap();
+        assert_eq!(index.name(a), Some("café.txt"));
+        assert_eq!(index.name(b), Some("next"));
     }
 
     #[test]
     fn full_path_of_root_is_its_name() {
-        let index = build(&[("c", u32::MAX)]);
-        assert_eq!(index.full_path(0), Some(Path::new("c").to_path_buf()));
+        let mut index = Index::new();
+        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        assert_eq!(index.full_path(root), Some(Path::new("c").to_path_buf()));
     }
 
     #[test]
     fn full_path_out_of_range_is_none() {
-        let index = build(&[("c", u32::MAX)]);
+        let mut index = Index::new();
+        index.push("c", u32::MAX, true, 0, 0).unwrap();
         assert_eq!(index.full_path(1), None);
     }
 
     #[test]
     fn full_path_with_missing_parent_is_none() {
-        let index = build(&[("c", u32::MAX), ("a.txt", 7)]);
-        assert_eq!(index.full_path(1), None);
+        let mut index = Index::new();
+        index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let orphan = index.push("a.txt", 7, false, 0, 0).unwrap();
+        assert_eq!(index.full_path(orphan), None);
     }
 
     #[test]
     fn full_path_walks_parents() {
-        let index = build(&[("c", u32::MAX), ("docs", 0), ("a.txt", 1)]);
+        let mut index = Index::new();
+        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let docs = index.push("docs", root, true, 0, 0).unwrap();
+        let file = index.push("a.txt", docs, false, 0, 0).unwrap();
         assert_eq!(
-            index.full_path(2),
+            index.full_path(file),
             Some(Path::new("c").join("docs").join("a.txt"))
         );
     }
 
     #[test]
     fn siblings_share_parent() {
-        let index = build(&[("c", u32::MAX), ("a.txt", 0), ("b.txt", 0)]);
-        assert_eq!(index.full_path(1), Some(Path::new("c").join("a.txt")));
-        assert_eq!(index.full_path(2), Some(Path::new("c").join("b.txt")));
+        let mut index = Index::new();
+        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let a = index.push("a.txt", root, false, 0, 0).unwrap();
+        let b = index.push("b.txt", root, false, 0, 0).unwrap();
+        assert_eq!(index.full_path(a), Some(Path::new("c").join("a.txt")));
+        assert_eq!(index.full_path(b), Some(Path::new("c").join("b.txt")));
     }
 }
