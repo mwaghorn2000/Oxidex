@@ -78,6 +78,11 @@ impl Index {
         let mut parts = Vec::new();
         let mut curr = id;
         while curr != u32::MAX {
+            // A valid chain visits each entry at most once, so a longer one
+            // means the parents form a cycle.
+            if parts.len() >= self.entries.len() {
+                return None;
+            }
             parts.push(self.display_name(curr)?);
             curr = self.entries[curr as usize].parent;
         }
