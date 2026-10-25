@@ -1,4 +1,4 @@
-struct Index {
+pub struct Index {
     // Lowercased names, used for matching.
     names: String,
     // Original-case names, used for showing results. Kept separate because
@@ -7,6 +7,7 @@ struct Index {
     entries: Vec<Entry>,
 }
 
+#[allow(dead_code)]
 pub struct Entry {
     name_start: u32,
     name_len: u16,
@@ -15,7 +16,7 @@ pub struct Entry {
     parent: u32,
     is_dir: bool,
     size: u64,
-    modifies: u64,
+    modified: u64,
 }
 
 // Returned by `push` when a name is longer than `u16::MAX` bytes.
@@ -53,7 +54,7 @@ impl Index {
             parent,
             is_dir,
             size,
-            modifies: modified,
+            modified,
         });
         self.names.push_str(&lowercase);
         self.display_names.push_str(name);
@@ -82,6 +83,12 @@ impl Index {
         }
 
         Some(parts.iter().rev().collect())
+    }
+}
+
+impl Default for Index {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
