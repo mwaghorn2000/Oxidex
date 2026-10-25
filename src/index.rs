@@ -77,7 +77,7 @@ impl Index {
         let mut parts = Vec::new();
         let mut curr = id;
         while curr != u32::MAX {
-            parts.push(self.name(curr)?);
+            parts.push(self.display_name(curr)?);
             curr = self.entries[curr as usize].parent;
         }
 
