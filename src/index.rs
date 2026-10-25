@@ -229,6 +229,15 @@ mod tests {
     }
 
     #[test]
+    fn full_path_with_parent_cycle_is_none() {
+        let mut index = Index::new();
+        let a = index.push("a", 1, true, 0, 0).unwrap();
+        let b = index.push("b", 0, true, 0, 0).unwrap();
+        assert_eq!(index.full_path(a), None);
+        assert_eq!(index.full_path(b), None);
+    }
+
+    #[test]
     fn full_path_walks_parents() {
         let mut index = Index::new();
         let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
