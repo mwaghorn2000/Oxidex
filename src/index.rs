@@ -24,23 +24,47 @@ pub struct NameTooLong;
 
 impl Index {
     pub fn new() -> Index {
-        todo!()
+        Index {
+            names: String::new(),
+            display_names: String::new(),
+            entries: Vec::new(),
+        }
     }
 
     // Appends an entry and returns its ID. `parent` is `u32::MAX` for a root.
     pub fn push(
         &mut self,
-        _name: &str,
-        _parent: u32,
-        _is_dir: bool,
-        _size: u64,
-        _modified: u64,
+        name: &str,
+        parent: u32,
+        is_dir: bool,
+        size: u64,
+        modified: u64,
     ) -> Result<u32, NameTooLong> {
-        todo!()
+        let lowercase = name.to_lowercase();
+        if lowercase.len() > u16::MAX as usize || name.len() > u16::MAX as usize {
+            return Err(NameTooLong);
+        }
+        let id = self.entries.len() as u32;
+        self.entries.push(Entry {
+            name_start: self.names.len() as u32,
+            name_len: lowercase.len() as u16,
+            display_start: self.display_names.len() as u32,
+            display_len: name.len() as u16,
+            parent,
+            is_dir,
+            size,
+            modifies: modified,
+        });
+        self.names.push_str(&lowercase);
+        self.display_names.push_str(name);
+        Ok(id)
     }
 
-    pub fn display_name(&self, _id: u32) -> Option<&str> {
-        todo!()
+    pub fn display_name(&self, id: u32) -> Option<&str> {
+        let e = self.entries.get(id as usize)?;
+        let start = e.display_start as usize;
+        self.display_names
+            .get(start..(start + e.display_len as usize))
     }
 
     pub fn name(&self, id: u32) -> Option<&str> {
@@ -89,11 +113,7 @@ mod tests {
         index
     }
 
-    // Tests below are for `new`, `push` and `display_name`, which are still
-    // stubs. Un-ignore each as it is implemented.
-
     #[test]
-    #[ignore = "not implemented"]
     fn new_index_is_empty() {
         let index = Index::new();
         assert_eq!(index.name(0), None);
@@ -102,7 +122,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "not implemented"]
     fn push_assigns_sequential_ids() {
         let mut index = Index::new();
         assert_eq!(index.push("c", u32::MAX, true, 0, 0), Ok(0));
@@ -115,7 +134,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "not implemented"]
     fn name_is_lowercased() {
         let mut index = Index::new();
         let id = index.push("ReadMe.MD", u32::MAX, false, 0, 0).unwrap();
@@ -123,7 +141,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "not implemented"]
     fn display_name_keeps_case() {
         let mut index = Index::new();
         let id = index.push("ReadMe.MD", u32::MAX, false, 0, 0).unwrap();
@@ -134,7 +151,6 @@ mod tests {
     // to 3 bytes ("i" + combining dot). Both buffers must stay in sync, and the
     // entry pushed afterwards must not be shifted.
     #[test]
-    #[ignore = "not implemented"]
     fn lowercasing_that_changes_length() {
         let mut index = Index::new();
         let a = index.push("ẞig", u32::MAX, false, 0, 0).unwrap();
@@ -149,7 +165,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "not implemented"]
     fn push_rejects_name_over_u16_max() {
         let mut index = Index::new();
         index.push("ok", u32::MAX, false, 0, 0).unwrap();
@@ -159,6 +174,18 @@ mod tests {
         assert_eq!(index.name(1), None);
         assert_eq!(index.names, "ok");
         assert_eq!(index.display_names, "ok");
+    }
+
+    // 'ẞ' is 3 bytes but lowercases to 2-byte 'ß', so this name is too long
+    // only in its original form. Checking just the lowercase length would let
+    // `display_len` silently truncate.
+    #[test]
+    fn push_rejects_long_display_name_that_shrinks() {
+        let mut index = Index::new();
+        let long = "ẞ".repeat(21_846);
+        assert!(long.len() > u16::MAX as usize);
+        assert!(long.to_lowercase().len() <= u16::MAX as usize);
+        assert_eq!(index.push(&long, u32::MAX, false, 0, 0), Err(NameTooLong));
     }
 
     #[test]
