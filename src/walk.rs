@@ -1,6 +1,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, mpsc};
+use std::thread;
 use std::time::UNIX_EPOCH;
 
 use crate::index::Index;
@@ -43,40 +45,112 @@ pub fn walk(root: &Path) -> io::Result<Walk> {
         return Ok(walk);
     }
 
-    // An explicit stack instead of recursion, so deep trees can't overflow
-    // the call stack.
-    let mut stack = Vec::new();
-    read_folder(&mut walk, fs::read_dir(&root)?, root_id, &mut stack);
-    while let Some((path, id)) = stack.pop() {
-        match fs::read_dir(&path) {
-            Ok(entries) => read_folder(&mut walk, entries, id, &mut stack),
-            Err(_) => walk.skipped += 1,
+    // Worker threads read folders and send back batches; this thread is the
+    // only one that touches the index, so IDs need no locking or renumbering.
+    let first = read_batch(fs::read_dir(&root)?, root_id);
+    let queue = Mutex::new(Queue {
+        dirs: Vec::new(),
+        done: false,
+    });
+    let ready = Condvar::new();
+    let (tx, rx) = mpsc::channel();
+    let workers = thread::available_parallelism().map_or(1, |n| n.get());
+    thread::scope(|s| {
+        let (queue, ready) = (&queue, &ready);
+        for _ in 0..workers {
+            let tx = tx.clone();
+            s.spawn(move || worker(queue, ready, tx));
         }
-    }
+        drop(tx);
+
+        // Folders queued or being read. Each one sends exactly one batch,
+        // so at zero every folder has been pushed.
+        let mut outstanding = push_batch(&mut walk, first, queue, ready);
+        while outstanding > 0 {
+            let Ok(batch) = rx.recv() else { break };
+            outstanding -= 1;
+            outstanding += push_batch(&mut walk, batch, queue, ready);
+        }
+        lock(queue).done = true;
+        ready.notify_all();
+    });
     Ok(walk)
 }
 
-// Pushes every entry in one folder and queues its subfolders on `stack`.
-fn read_folder(
-    walk: &mut Walk,
-    entries: fs::ReadDir,
+// Folders waiting to be read. `done` tells idle workers to exit.
+struct Queue {
+    dirs: Vec<(PathBuf, u32)>,
+    done: bool,
+}
+
+// One folder's contents, read by a worker and waiting to be pushed.
+struct Batch {
     parent: u32,
-    stack: &mut Vec<(PathBuf, u32)>,
-) {
+    found: Vec<Found>,
+    skipped: u64,
+}
+
+struct Found {
+    name: String,
+    size: u64,
+    modified: u64,
+    // Set only for folders, which still need to be read.
+    path: Option<PathBuf>,
+}
+
+// A worker only panics on a bug, and the queue stays valid if one does, so
+// a poisoned lock is safe to keep using.
+fn lock(queue: &Mutex<Queue>) -> MutexGuard<'_, Queue> {
+    queue.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn worker(queue: &Mutex<Queue>, ready: &Condvar, tx: mpsc::Sender<Batch>) {
+    loop {
+        let (path, id) = {
+            let mut q = lock(queue);
+            loop {
+                if q.done {
+                    return;
+                }
+                if let Some(dir) = q.dirs.pop() {
+                    break dir;
+                }
+                q = ready.wait(q).unwrap_or_else(PoisonError::into_inner);
+            }
+        };
+        let batch = match fs::read_dir(&path) {
+            Ok(entries) => read_batch(entries, id),
+            Err(_) => Batch {
+                parent: id,
+                found: Vec::new(),
+                skipped: 1,
+            },
+        };
+        if tx.send(batch).is_err() {
+            return;
+        }
+    }
+}
+
+fn read_batch(entries: fs::ReadDir, parent: u32) -> Batch {
+    let mut batch = Batch {
+        parent,
+        found: Vec::new(),
+        skipped: 0,
+    };
     for entry in entries {
         let Ok(entry) = entry else {
-            walk.skipped += 1;
+            batch.skipped += 1;
             continue;
         };
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            walk.skipped += 1;
+        let Ok(name) = entry.file_name().into_string() else {
+            batch.skipped += 1;
             continue;
         };
         // `file_type` doesn't follow symlinks, so a link to a folder is
         // stored as a plain entry and never entered.
         let Ok(file_type) = entry.file_type() else {
-            walk.skipped += 1;
+            batch.skipped += 1;
             continue;
         };
         let is_dir = file_type.is_dir();
@@ -85,14 +159,45 @@ fn read_folder(
             Ok(meta) => (meta.len(), modified_secs(&meta)),
             Err(_) => (0, 0),
         };
-        let Ok(id) = walk.index.push(name, parent, is_dir, size, modified) else {
+        let path = if is_dir { Some(entry.path()) } else { None };
+        batch.found.push(Found {
+            name,
+            size,
+            modified,
+            path,
+        });
+    }
+    batch
+}
+
+// Pushes a batch into the index and queues its subfolders. Returns how many
+// folders it queued.
+fn push_batch(walk: &mut Walk, batch: Batch, queue: &Mutex<Queue>, ready: &Condvar) -> usize {
+    walk.skipped += batch.skipped;
+    let mut dirs = Vec::new();
+    for f in batch.found {
+        let is_dir = f.path.is_some();
+        let Ok(id) = walk
+            .index
+            .push(&f.name, batch.parent, is_dir, f.size, f.modified)
+        else {
             walk.skipped += 1;
             continue;
         };
-        if is_dir {
-            stack.push((entry.path(), id));
+        if let Some(path) = f.path {
+            dirs.push((path, id));
         }
     }
+    let queued = dirs.len();
+    if queued > 0 {
+        lock(queue).dirs.extend(dirs);
+        // Wake one worker per folder rather than all of them, so idle
+        // workers don't all fight over the lock for a single folder.
+        for _ in 0..queued {
+            ready.notify_one();
+        }
+    }
+    queued
 }
 
 // Seconds since 1970, or 0 if the OS can't say.
