@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread;
@@ -16,8 +17,9 @@ pub struct Walk {
 
 // Crawls `root` and returns an index of everything under it. The root entry's
 // name is its full canonical path, so `full_path` gives absolute paths. Only
-// fails if `root` itself can't be read.
-pub fn walk(root: &Path) -> io::Result<Walk> {
+// fails if `root` itself can't be read. `workers` is how many threads read
+// folders.
+pub fn walk(root: &Path, workers: NonZeroUsize) -> io::Result<Walk> {
     let root = fs::canonicalize(root)?;
     let meta = fs::metadata(&root)?;
     let Some(name) = root.to_str() else {
@@ -54,10 +56,9 @@ pub fn walk(root: &Path) -> io::Result<Walk> {
     });
     let ready = Condvar::new();
     let (tx, rx) = mpsc::channel();
-    let workers = thread::available_parallelism().map_or(1, |n| n.get());
     thread::scope(|s| {
         let (queue, ready) = (&queue, &ready);
-        for _ in 0..workers {
+        for _ in 0..workers.get() {
             let tx = tx.clone();
             s.spawn(move || worker(queue, ready, tx));
         }
@@ -214,6 +215,8 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    const WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+
     // A fresh, empty folder per test so tests can run in parallel.
     fn temp_dir(test: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("oxidex-{}-{test}", std::process::id()));
@@ -236,7 +239,7 @@ mod tests {
     #[test]
     fn root_name_is_full_path() {
         let dir = temp_dir("root_name");
-        let walk = walk(&dir).unwrap();
+        let walk = walk(&dir, WORKERS).unwrap();
         assert_eq!(walk.index.display_name(0), dir.to_str());
         assert_eq!(walk.index.full_path(0), Some(dir.clone()));
         fs::remove_dir_all(&dir).unwrap();
@@ -249,7 +252,7 @@ mod tests {
         fs::write(dir.join("a/b/c.txt"), "hi").unwrap();
         fs::write(dir.join("d.txt"), "").unwrap();
 
-        let walk = walk(&dir).unwrap();
+        let walk = walk(&dir, WORKERS).unwrap();
         let expected = vec![
             dir.clone(),
             dir.join("a"),
@@ -263,8 +266,25 @@ mod tests {
     }
 
     #[test]
+    fn one_worker_finds_everything() {
+        let dir = temp_dir("one_worker");
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        fs::write(dir.join("a/b/c.txt"), "").unwrap();
+
+        let walk = walk(&dir, NonZeroUsize::MIN).unwrap();
+        let expected = vec![
+            dir.clone(),
+            dir.join("a"),
+            dir.join("a/b"),
+            dir.join("a/b/c.txt"),
+        ];
+        assert_eq!(all_paths(&walk.index), expected);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn relative_root_becomes_absolute() {
-        let walk = walk(Path::new("src")).unwrap();
+        let walk = walk(Path::new("src"), WORKERS).unwrap();
         let root = walk.index.full_path(0).unwrap();
         assert!(root.is_absolute());
         assert!(root.ends_with("src"));
@@ -273,7 +293,7 @@ mod tests {
     #[test]
     fn missing_root_is_error() {
         let dir = temp_dir("missing");
-        assert!(walk(&dir.join("nope")).is_err());
+        assert!(walk(&dir.join("nope"), WORKERS).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -285,7 +305,7 @@ mod tests {
         fs::write(dir.join("a/f.txt"), "").unwrap();
         std::os::unix::fs::symlink(dir.join("a"), dir.join("link")).unwrap();
 
-        let walk = walk(&dir).unwrap();
+        let walk = walk(&dir, WORKERS).unwrap();
         let expected = vec![
             dir.clone(),
             dir.join("a"),
@@ -307,7 +327,7 @@ mod tests {
         fs::write(locked.join("hidden.txt"), "").unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let result = walk(&dir);
+        let result = walk(&dir, WORKERS);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         let walk = result.unwrap();
         // The folder itself is listed; only its contents are missing.
@@ -326,7 +346,7 @@ mod tests {
         fs::write(dir.join(OsStr::from_bytes(b"bad\xff.txt")), "").unwrap();
         fs::write(dir.join("good.txt"), "").unwrap();
 
-        let walk = walk(&dir).unwrap();
+        let walk = walk(&dir, WORKERS).unwrap();
         assert_eq!(
             all_paths(&walk.index),
             vec![dir.clone(), dir.join("good.txt")]
