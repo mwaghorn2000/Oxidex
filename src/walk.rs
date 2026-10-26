@@ -1,19 +1,106 @@
+use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use crate::index::Index;
 
 pub struct Walk {
     pub index: Index,
-    // Folders that couldn't be read plus names that aren't valid UTF-8.
+    // Folders that couldn't be read, names that aren't valid UTF-8, and
+    // entries the OS failed to list.
     pub skipped: u64,
 }
 
 // Crawls `root` and returns an index of everything under it. The root entry's
 // name is its full canonical path, so `full_path` gives absolute paths. Only
 // fails if `root` itself can't be read.
-pub fn walk(_root: &Path) -> io::Result<Walk> {
-    todo!()
+pub fn walk(root: &Path) -> io::Result<Walk> {
+    let root = fs::canonicalize(root)?;
+    let meta = fs::metadata(&root)?;
+    let Some(name) = root.to_str() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "root path is not valid UTF-8",
+        ));
+    };
+    let is_dir = meta.is_dir();
+    let size = if is_dir { 0 } else { meta.len() };
+    let mut walk = Walk {
+        index: Index::new(),
+        skipped: 0,
+    };
+    let Ok(root_id) = walk
+        .index
+        .push(name, u32::MAX, is_dir, size, modified_secs(&meta))
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "root path is too long",
+        ));
+    };
+    if !is_dir {
+        return Ok(walk);
+    }
+
+    // An explicit stack instead of recursion, so deep trees can't overflow
+    // the call stack.
+    let mut stack = Vec::new();
+    read_folder(&mut walk, fs::read_dir(&root)?, root_id, &mut stack);
+    while let Some((path, id)) = stack.pop() {
+        match fs::read_dir(&path) {
+            Ok(entries) => read_folder(&mut walk, entries, id, &mut stack),
+            Err(_) => walk.skipped += 1,
+        }
+    }
+    Ok(walk)
+}
+
+// Pushes every entry in one folder and queues its subfolders on `stack`.
+fn read_folder(
+    walk: &mut Walk,
+    entries: fs::ReadDir,
+    parent: u32,
+    stack: &mut Vec<(PathBuf, u32)>,
+) {
+    for entry in entries {
+        let Ok(entry) = entry else {
+            walk.skipped += 1;
+            continue;
+        };
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            walk.skipped += 1;
+            continue;
+        };
+        // `file_type` doesn't follow symlinks, so a link to a folder is
+        // stored as a plain entry and never entered.
+        let Ok(file_type) = entry.file_type() else {
+            walk.skipped += 1;
+            continue;
+        };
+        let is_dir = file_type.is_dir();
+        let (size, modified) = match entry.metadata() {
+            Ok(meta) if is_dir => (0, modified_secs(&meta)),
+            Ok(meta) => (meta.len(), modified_secs(&meta)),
+            Err(_) => (0, 0),
+        };
+        let Ok(id) = walk.index.push(name, parent, is_dir, size, modified) else {
+            walk.skipped += 1;
+            continue;
+        };
+        if is_dir {
+            stack.push((entry.path(), id));
+        }
+    }
+}
+
+// Seconds since 1970, or 0 if the OS can't say.
+fn modified_secs(meta: &fs::Metadata) -> u64 {
+    match meta.modified().map(|t| t.duration_since(UNIX_EPOCH)) {
+        Ok(Ok(d)) => d.as_secs(),
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
