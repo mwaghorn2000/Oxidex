@@ -18,7 +18,8 @@ pub struct Walk {
 // Crawls `root` and returns an index of everything under it. The root entry's
 // name is its full canonical path, so `full_path` gives absolute paths. Only
 // fails if `root` itself can't be read. `workers` is how many threads read
-// folders.
+// folders. One crawls on the calling thread and uses the least CPU; more
+// finish sooner.
 pub fn walk(root: &Path, workers: NonZeroUsize) -> io::Result<Walk> {
     let root = fs::canonicalize(root)?;
     let meta = fs::metadata(&root)?;
@@ -47,9 +48,22 @@ pub fn walk(root: &Path, workers: NonZeroUsize) -> io::Result<Walk> {
         return Ok(walk);
     }
 
+    let first = read_batch(fs::read_dir(&root)?, root_id);
+    // With one worker, handing each folder to another thread and back costs
+    // more than reading it (see BENCHMARKS.md), so crawl on this thread.
+    if workers.get() == 1 {
+        let mut stack = push_entries(&mut walk, first);
+        while let Some((path, id)) = stack.pop() {
+            match fs::read_dir(&path) {
+                Ok(entries) => stack.extend(push_entries(&mut walk, read_batch(entries, id))),
+                Err(_) => walk.skipped += 1,
+            }
+        }
+        return Ok(walk);
+    }
+
     // Worker threads read folders and send back batches; this thread is the
     // only one that touches the index, so IDs need no locking or renumbering.
-    let first = read_batch(fs::read_dir(&root)?, root_id);
     let queue = Mutex::new(Queue {
         dirs: Vec::new(),
         done: false,
@@ -174,6 +188,22 @@ fn read_batch(entries: fs::ReadDir, parent: u32) -> Batch {
 // Pushes a batch into the index and queues its subfolders. Returns how many
 // folders it queued.
 fn push_batch(walk: &mut Walk, batch: Batch, queue: &Mutex<Queue>, ready: &Condvar) -> usize {
+    let dirs = push_entries(walk, batch);
+    let queued = dirs.len();
+    if queued > 0 {
+        lock(queue).dirs.extend(dirs);
+        // Wake one worker per folder rather than all of them, so idle
+        // workers don't all fight over the lock for a single folder.
+        for _ in 0..queued {
+            ready.notify_one();
+        }
+    }
+    queued
+}
+
+// Pushes a batch into the index and returns its subfolders, which still need
+// to be read.
+fn push_entries(walk: &mut Walk, batch: Batch) -> Vec<(PathBuf, u32)> {
     walk.skipped += batch.skipped;
     let mut dirs = Vec::new();
     for f in batch.found {
@@ -189,16 +219,7 @@ fn push_batch(walk: &mut Walk, batch: Batch, queue: &Mutex<Queue>, ready: &Condv
             dirs.push((path, id));
         }
     }
-    let queued = dirs.len();
-    if queued > 0 {
-        lock(queue).dirs.extend(dirs);
-        // Wake one worker per folder rather than all of them, so idle
-        // workers don't all fight over the lock for a single folder.
-        for _ in 0..queued {
-            ready.notify_one();
-        }
-    }
-    queued
+    dirs
 }
 
 // Seconds since 1970, or 0 if the OS can't say.
