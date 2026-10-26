@@ -29,6 +29,7 @@ pub fn walk(root: &Path, workers: NonZeroUsize) -> io::Result<Walk> {
             "root path is not valid UTF-8",
         ));
     };
+    let name = strip_verbatim(name);
     let is_dir = meta.is_dir();
     let size = if is_dir { 0 } else { meta.len() };
     let mut walk = Walk {
@@ -37,7 +38,7 @@ pub fn walk(root: &Path, workers: NonZeroUsize) -> io::Result<Walk> {
     };
     let Ok(root_id) = walk
         .index
-        .push(name, u32::MAX, is_dir, size, modified_secs(&meta))
+        .push(&name, u32::MAX, is_dir, size, modified_secs(&meta))
     else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -222,6 +223,20 @@ fn push_entries(walk: &mut Walk, batch: Batch) -> Vec<(PathBuf, u32)> {
     dirs
 }
 
+// `fs::canonicalize` returns Windows paths in verbatim form (`\\?\C:\...`).
+// The root's name starts every result path, so turn it back into the usual
+// form. Volume GUID paths (`\\?\Volume{...}`) only work verbatim, so they
+// keep the prefix.
+fn strip_verbatim(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => path.to_string(),
+    }
+}
+
 // Seconds since 1970, or 0 if the OS can't say.
 fn modified_secs(meta: &fs::Metadata) -> u64 {
     match meta.modified().map(|t| t.duration_since(UNIX_EPOCH)) {
@@ -243,7 +258,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oxidex-{}-{test}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        fs::canonicalize(&dir).unwrap()
+        let dir = fs::canonicalize(&dir).unwrap();
+        PathBuf::from(strip_verbatim(dir.to_str().unwrap()))
     }
 
     fn all_paths(index: &Index) -> Vec<PathBuf> {
@@ -301,6 +317,19 @@ mod tests {
         ];
         assert_eq!(all_paths(&walk.index), expected);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn verbatim_prefix_is_stripped() {
+        assert_eq!(strip_verbatim(r"\\?\C:\Users\me"), r"C:\Users\me");
+        assert_eq!(strip_verbatim(r"\\?\C:\"), r"C:\");
+        assert_eq!(
+            strip_verbatim(r"\\?\UNC\server\share\dir"),
+            r"\\server\share\dir"
+        );
+        let volume = r"\\?\Volume{0b1c2d3e-0000-0000-0000-000000000000}\dir";
+        assert_eq!(strip_verbatim(volume), volume);
+        assert_eq!(strip_verbatim("/home/me"), "/home/me");
     }
 
     #[test]
