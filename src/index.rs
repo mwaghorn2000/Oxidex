@@ -116,6 +116,11 @@ impl Index {
         Some(parts.iter().rev().collect())
     }
 
+    // Seconds since 1970, or 0 if the OS couldn't say.
+    pub fn modified(&self, id: u32) -> Option<u64> {
+        Some(self.entries.get(id as usize)?.modified)
+    }
+
     pub fn masks(&self) -> &[u64] {
         &self.masks
     }
@@ -321,6 +326,16 @@ mod tests {
         let a = index.push("a", 1, true, 0, 0).unwrap();
         index.push("b", 0, true, 0, 0).unwrap();
         assert_eq!(index.depth(a), None);
+    }
+
+    #[test]
+    fn modified_returns_each_entry() {
+        let mut index = Index::new();
+        let a = index.push("a", u32::MAX, false, 0, 100).unwrap();
+        let b = index.push("b", u32::MAX, false, 0, 200).unwrap();
+        assert_eq!(index.modified(a), Some(100));
+        assert_eq!(index.modified(b), Some(200));
+        assert_eq!(index.modified(b + 1), None);
     }
 
     #[test]
