@@ -32,9 +32,16 @@ jumping, below.
   `readme.md`. A whole-name match ranks just above a stem match.
 - Spaces in a query are literal characters: `foo bar` matches names
   containing `foo bar`, in that order.
-- In path mode (`docs/rea`), each folder part must subsequence-match a
-  folder name on the way up the parent chain. Results are ranked by the
-  file-name part only.
+- In path mode (`docs/rea`, or with `\`), each folder part must
+  subsequence-match a folder name on the way up the parent chain. Results
+  are ranked by the file-name part only.
+  - Folder parts match in order, but not necessarily as direct parents:
+    `docs/notes` finds `docs/old/notes.txt`, and `a/b/x` needs `b` inside
+    `a`.
+  - Empty parts are ignored (`/notes`, `docs//notes`). An empty file part
+    (`docs/`) returns nothing for now.
+  - Folders are only checked after the file part matches, so path mode
+    costs nothing for names that don't.
 - Queries of 1–2 characters only match exactly or as a prefix. Almost
   every name contains one or two given letters somewhere, so a subsequence
   match says nothing useful, and scoring them all was slow. Subsequence
@@ -228,6 +235,8 @@ complicated.
 - **Multi-word search.** fzf-style, where `foo bar` matches names
   containing both words in any order. Until then, spaces are literal.
 - **Accent folding**, so `cafe` matches `café`.
+- **Folder contents for `docs/`**: show what's inside matching folders
+  instead of nothing.
 - **camelCase bonus** in subsequence matching, using the display names.
 
 ## Build order

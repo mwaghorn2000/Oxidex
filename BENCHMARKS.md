@@ -240,3 +240,15 @@ modified-time scorers. Both run on every match, through
 | `raedme` | 10.9 ms | 10.5 ms |
 
 0.2–0.5 ms per query, so dynamic dispatch stays.
+
+### Path mode
+
+| Query | Time | Same query without the folder part |
+|---|---|---|
+| `projects/readme` | 10.9 ms | `readme` 10.3 ms |
+| `oxidex/search.rs` | 16.6 ms | `search.rs` 16.6 ms |
+| `src/main.rs` | 8.0 ms | `main.rs` 7.8 ms |
+| `p/s/m` | 5.7 ms | — |
+
+The folder check adds 0–0.6 ms. `search.rs` is slow on its own: at 9
+characters it allows 2 typos, and the edit-distance tables are the cost.
