@@ -40,7 +40,7 @@ Keep dependencies minimal. Prefer the standard library. Well-known, focused crat
 
 - Write simple, direct code. If something can be done in 50 lines instead of 200, do it in 50.
 - Comment complex code.
-- No abstractions, traits, or generics for things that only have one implementation. The `Extractor` trait is the deliberate exception.
+- No abstractions, traits, or generics for things that only have one implementation. The `Extractor` trait and the scoring trait (one implementation per ranking signal, see `RANKING.md`) are the deliberate exceptions.
 - Follow standard Rust naming: `snake_case` for functions and fields, `CamelCase` for types.
 - Keep functions short and focused. Prefer plain loops and early returns over clever iterator chains when they're clearer.
 - Library code returns `Result` and never panics on bad input or I/O errors. No `unwrap()` or `expect()` in `oxidex-core` outside tests.
