@@ -5,7 +5,7 @@
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oxidex::index::Index;
 
@@ -41,6 +41,10 @@ fn main() {
         let naive = median(&mut times);
 
         let mut hits = Vec::new();
+        let scorers = oxidex::score::default_scorers();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         times.clear();
         for _ in 0..RUNS {
             let start = Instant::now();
@@ -49,6 +53,8 @@ fn main() {
                 std::slice::from_ref(&index),
                 &query,
                 LIMIT,
+                &scorers,
+                now,
                 &cancel,
                 &mut hits,
             );

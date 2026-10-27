@@ -5,17 +5,18 @@
 //
 // 1. Tier (`Tier`): what kind of match it is. A new kind of match is a new
 //    `Tier` variant plus a check in `match_name`.
-// 2. Score (`Hit::score`): how good the match is within its tier. Match
-//    quality comes from `match_name`. New ranking signals (modified time,
-//    frecency, ...) are added on top where the `Hit` is built in `search`,
-//    marked "RANKING SIGNALS". They will be `Scorer` implementations
-//    (RANKING.md, build step 7). Don't put them in `match_name` or `compare`.
+// 2. Score (`Hit::score`): how good the match is within its tier. It's the
+//    total of the `Scorer`s passed to `search`: match quality from
+//    `match_name`, plus signals like modified time. A new signal is a new
+//    `Scorer` in score.rs, added to `default_scorers`. Don't put signals in
+//    `match_name` or `compare`.
 // 3. Tiebreaks (`compare`): only for hits with equal tier and score, so the
 //    order never shuffles between searches. Not a place for ranking signals.
 use std::cmp::Ordering;
 use std::sync::atomic::{self, AtomicU64};
 
 use crate::index::{Index, char_mask};
+use crate::score::{Candidate, Scorer, total};
 
 // Ordered best first, so sorting by tier puts exact matches on top. Tiers
 // are strict: a hit in a better tier always ranks above one in a worse tier,
@@ -43,8 +44,8 @@ pub struct Hit {
     // Entry ID within that index.
     pub id: u32,
     pub tier: Tier,
-    // How good the hit is within its tier. Higher is better. For now this
-    // is match quality alone, 0 to 1000; ranking signals will add to it.
+    // How good the hit is within its tier: the total of every scorer's
+    // points. Higher is better.
     pub score: i32,
 }
 
@@ -100,12 +101,16 @@ const GAP_EXTEND: i32 = 1;
 
 // Fills `out` with up to `limit` hits for `query` from all of `indexes`,
 // best first. An exact match is the whole name or the name without its
-// extension. Matching is case-insensitive. If `cancel` fires, stops early,
-// clears `out` so a partial list is never shown, and returns `Cancelled`.
+// extension. Matching is case-insensitive. Hits within a tier are ranked by
+// `scorers` (usually `score::default_scorers()`), with `now` in seconds since
+// 1970. If `cancel` fires, stops early, clears `out` so a partial list is
+// never shown, and returns `Cancelled`.
 pub fn search(
     indexes: &[Index],
     query: &str,
     limit: usize,
+    scorers: &[Box<dyn Scorer>],
+    now: u64,
     cancel: &Cancel,
     out: &mut Vec<Hit>,
 ) -> Result<(), Cancelled> {
@@ -139,15 +144,22 @@ pub fn search(
             let Some(name) = index.name(id) else {
                 continue;
             };
-            if let Some((tier, score)) = match_name(name, &query, &mut scratch) {
-                // RANKING SIGNALS: new signals (modified time, frecency, ...)
-                // add to `score` here, before the hit competes for a place in
-                // `out`. See the top of this file.
+            if let Some((tier, quality)) = match_name(name, &query, &mut scratch) {
+                // RANKING SIGNALS are applied here, before the hit competes
+                // for a place in `out`. Add new ones to `default_scorers` in
+                // score.rs, not here.
+                let candidate = Candidate {
+                    index,
+                    id,
+                    tier,
+                    quality,
+                    now,
+                };
                 let hit = Hit {
                     index: number as u32,
                     id,
                     tier,
-                    score,
+                    score: total(scorers, &candidate),
                 };
                 keep(indexes, limit, out, &mut worst, hit);
             }
@@ -452,6 +464,7 @@ fn find_worst(indexes: &[Index], out: &[Hit]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::score::{Quality, default_scorers};
     use std::sync::atomic::AtomicU64;
 
     // A root folder with each name as a direct child file.
@@ -471,6 +484,8 @@ mod tests {
             std::slice::from_ref(index),
             query,
             limit,
+            &default_scorers(),
+            0,
             &Cancel::never(),
             &mut out,
         )
@@ -646,7 +661,16 @@ mod tests {
         let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
         let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
         let mut out = Vec::new();
-        search(&[index], "a.txt", 10, &Cancel::never(), &mut out).unwrap();
+        search(
+            &[index],
+            "a.txt",
+            10,
+            &default_scorers(),
+            0,
+            &Cancel::never(),
+            &mut out,
+        )
+        .unwrap();
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [shallow, deep]);
     }
@@ -658,7 +682,16 @@ mod tests {
         let first = index.push("a.txt", root, false, 0, 0).unwrap();
         let second = index.push("a.txt", root, false, 0, 0).unwrap();
         let mut out = Vec::new();
-        search(&[index], "a.txt", 10, &Cancel::never(), &mut out).unwrap();
+        search(
+            &[index],
+            "a.txt",
+            10,
+            &default_scorers(),
+            0,
+            &Cancel::never(),
+            &mut out,
+        )
+        .unwrap();
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [first, second]);
     }
@@ -674,7 +707,16 @@ mod tests {
     // Index number and display name of each hit, in result order.
     fn hits_across(indexes: &[Index], query: &str, limit: usize) -> Vec<(u32, String)> {
         let mut out = Vec::new();
-        search(indexes, query, limit, &Cancel::never(), &mut out).unwrap();
+        search(
+            indexes,
+            query,
+            limit,
+            &default_scorers(),
+            0,
+            &Cancel::never(),
+            &mut out,
+        )
+        .unwrap();
         out.iter()
             .map(|hit| {
                 let name = indexes[hit.index as usize].display_name(hit.id).unwrap();
@@ -817,6 +859,80 @@ mod tests {
         assert_eq!(names(&index, "slack", 10), ["slack.exe", "slick"]);
     }
 
+    const DAY: u64 = 86_400;
+    const NOW: u64 = 1_000 * DAY;
+
+    // Two entries with the same name, depth and match: only the modified
+    // time tells them apart. The older is pushed first, so without the
+    // modified scorer the tiebreak would put it first.
+    #[test]
+    fn newer_file_ranks_higher_on_equal_match() {
+        let mut index = Index::new();
+        let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
+        let old = index
+            .push("a.txt", root, false, 0, NOW - 365 * DAY)
+            .unwrap();
+        let new = index.push("a.txt", root, false, 0, NOW).unwrap();
+        let mut out = Vec::new();
+        search(
+            &[index],
+            "a.txt",
+            10,
+            &default_scorers(),
+            NOW,
+            &Cancel::never(),
+            &mut out,
+        )
+        .unwrap();
+        let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
+        assert_eq!(ids, [new, old]);
+    }
+
+    // The modified boost only adjusts within a tier's quality range: a much
+    // better prefix match still beats a brand new one.
+    #[test]
+    fn better_match_beats_newer_file() {
+        let mut index = Index::new();
+        let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
+        index
+            .push("readme", root, false, 0, NOW - 365 * DAY)
+            .unwrap();
+        index
+            .push("readme_old_backup", root, false, 0, NOW)
+            .unwrap();
+        let mut out = Vec::new();
+        search(
+            &[index],
+            "read",
+            10,
+            &default_scorers(),
+            NOW,
+            &Cancel::never(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out[0].id, 1);
+    }
+
+    // The score comes from the scorers passed in, not a fixed formula.
+    #[test]
+    fn hit_score_is_total_of_scorers() {
+        let index = index_of(&["a.txt"]);
+        let scorers: Vec<Box<dyn Scorer>> = vec![Box::new(Quality { weight: 2 })];
+        let mut out = Vec::new();
+        search(
+            &[index],
+            "a.txt",
+            10,
+            &scorers,
+            NOW,
+            &Cancel::never(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out[0].score, 2000);
+    }
+
     #[test]
     fn cancel_follows_latest_generation() {
         let latest = AtomicU64::new(3);
@@ -839,6 +955,8 @@ mod tests {
             &[index_of(&["a.txt"])],
             "a",
             10,
+            &default_scorers(),
+            0,
             &Cancel::new(&latest, 1),
             &mut out,
         );
@@ -861,6 +979,8 @@ mod tests {
             &[index_of(&["a.txt"])],
             "a",
             10,
+            &default_scorers(),
+            0,
             &Cancel::new(&latest, 1),
             &mut out,
         );
