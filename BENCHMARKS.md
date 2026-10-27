@@ -173,3 +173,38 @@ Worst cases got faster, because there's no second scan. Typical queries of
 or prefix match now gets a length check and, if its length is close to the
 query's, an edit-distance table. This is the biggest single cost to look at
 when optimising.
+
+## Optimisation
+
+### Missing-character filter
+
+Each entry stores a 64-bit mask of the characters in its name (`char_mask`).
+A name missing more distinct query characters than `max_edits` can't match
+in any tier, so search skips it without reading the name.
+
+| Query | Before | After |
+|---|---|---|
+| `a` | 13.9 ms | 11.4 ms |
+| `e` | — | 12.5 ms |
+| `rdm` | 18.7 ms | 5.6 ms |
+| `readme` | 28.0 ms | 10.4 ms |
+| `main.rs` | 27.4 ms | 8.1 ms |
+| `cargo` | 27.1 ms | 7.0 ms |
+| `zzqxj` | 23.3 ms | 1.0 ms |
+| `raedme` | 27.4 ms | 10.9 ms |
+| `café` | 42.3 ms | 29.4 ms |
+| `docuemntation` | 41.1 ms | 6.4 ms |
+
+Several queries are now faster than the naive scan, because most names
+are never read. Building the masks didn't change walk time measurably
+(median 320 ms with, 313 ms without; warm walks vary from 0.22 to 0.46 s).
+
+Checked against the unfiltered search on `/usr` with no result limit: all
+25,103 results for 10 queries had the same paths, tiers and scores.
+
+What's left:
+
+- **`a` and `e`** match most names, so the filter can't skip them. Their
+  time goes on scoring and on keeping the top 50.
+- **Non-ASCII queries** (`café`): the mask doesn't track `é`, so more names
+  pass, and each of those is decoded into `char`s.

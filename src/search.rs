@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 use std::sync::atomic::{self, AtomicU64};
 
-use crate::index::Index;
+use crate::index::{Index, char_mask};
 
 // Ordered best first, so sorting by tier puts exact matches on top. Tiers
 // are strict: a hit in a better tier always ranks above one in a worse tier,
@@ -122,13 +122,23 @@ pub fn search(
     // indexes, so they compete for the same `limit` places.
     let mut worst = None;
     for (number, index) in indexes.iter().enumerate() {
-        let mut id = 0;
-        while let Some(name) = index.name(id) {
+        for (id, &mask) in index.masks().iter().enumerate() {
+            let id = id as u32;
             // Checked at entry 0 too, so an already-stale search does no work.
-            if id % CANCEL_CHECK_EVERY == 0 && cancel.is_cancelled() {
+            if id.is_multiple_of(CANCEL_CHECK_EVERY) && cancel.is_cancelled() {
                 out.clear();
                 return Err(Cancelled);
             }
+            // Each distinct query character missing from the name needs at
+            // least one edit, and every tier but typos needs none missing. So
+            // a name missing more than `max_edits` can't match at all. This
+            // rules out most names without reading them.
+            if (query.mask & !mask).count_ones() as usize > query.max_edits {
+                continue;
+            }
+            let Some(name) = index.name(id) else {
+                continue;
+            };
             if let Some((tier, score)) = match_name(name, &query, &mut scratch) {
                 // RANKING SIGNALS: new signals (modified time, frecency, ...)
                 // add to `score` here, before the hit competes for a place in
@@ -141,7 +151,6 @@ pub fn search(
                 };
                 keep(indexes, limit, out, &mut worst, hit);
             }
-            id += 1;
         }
     }
     out.sort_by(|a, b| compare(indexes, a, b));
@@ -158,6 +167,8 @@ struct Query {
     // Other queries are matched by `char`.
     ascii: bool,
     max_edits: usize,
+    // `char_mask` of `text`, for the missing-character filter in `search`.
+    mask: u64,
 }
 
 impl Query {
@@ -167,6 +178,7 @@ impl Query {
         Query {
             ascii: text.is_ascii(),
             max_edits: max_edits(chars.len()),
+            mask: char_mask(&text),
             text,
             chars,
         }
@@ -723,6 +735,14 @@ mod tests {
     #[test]
     fn long_query_allows_two_edits() {
         let tier = tier_of(&["documentation.pdf"], "docuemntation");
+        assert_eq!(tier, Some(Tier::Levenshtein));
+    }
+
+    // 'y' and 'x' are both missing from the name: exactly the 2 edits a
+    // 13-letter query allows, so the missing-letter filter must let it by.
+    #[test]
+    fn two_missing_letters_within_two_edits_match() {
+        let tier = tier_of(&["documentation.pdf"], "dycumentatiox");
         assert_eq!(tier, Some(Tier::Levenshtein));
     }
 
