@@ -17,8 +17,81 @@ pub struct Hit {
 // Fills `out` with up to `limit` hits for `query`, best tier first. An exact
 // match is the whole name or the name without its extension. Matching is
 // case-insensitive.
-pub fn search(_index: &Index, _query: &str, _limit: usize, _out: &mut Vec<Hit>) {
-    todo!()
+pub fn search(index: &Index, query: &str, limit: usize, out: &mut Vec<Hit>) {
+    out.clear();
+    if query.is_empty() || limit == 0 {
+        return;
+    }
+    let query = query.to_lowercase();
+    // ASCII bytes never occur inside a multi-byte UTF-8 character, so an
+    // ASCII query can be matched byte by byte without splitting characters.
+    let ascii = query.is_ascii();
+
+    // Hits at or below this tier can't replace anything once `out` is full.
+    let mut worst = Tier::Subsequence;
+    let mut id = 0;
+    while let Some(name) = index.name(id) {
+        if out.len() == limit && worst == Tier::Exact {
+            break;
+        }
+        if let Some(tier) = match_tier(name, &query, ascii) {
+            if out.len() < limit {
+                out.push(Hit { id, tier });
+            } else if tier < worst {
+                replace_worst(out, Hit { id, tier });
+            }
+            if out.len() == limit {
+                worst = out.iter().map(|h| h.tier).max().unwrap_or(Tier::Exact);
+            }
+        }
+        id += 1;
+    }
+    out.sort_by_key(|h| (h.tier, h.id));
+}
+
+fn match_tier(name: &str, query: &str, ascii: bool) -> Option<Tier> {
+    // A leading dot starts the name (".bashrc"), not an extension.
+    let stem = match name.rfind('.') {
+        Some(dot) if dot > 0 => &name[..dot],
+        _ => name,
+    };
+    if name == query || stem == query {
+        return Some(Tier::Exact);
+    }
+    if name.starts_with(query) {
+        return Some(Tier::Prefix);
+    }
+    let found = if ascii {
+        is_subsequence(name.as_bytes().iter(), query.as_bytes().iter())
+    } else {
+        is_subsequence(name.chars(), query.chars())
+    };
+    found.then_some(Tier::Subsequence)
+}
+
+// True if every item of `query` appears in `name`, in order.
+fn is_subsequence<T: PartialEq>(
+    mut name: impl Iterator<Item = T>,
+    query: impl Iterator<Item = T>,
+) -> bool {
+    for q in query {
+        if !name.any(|n| n == q) {
+            return false;
+        }
+    }
+    true
+}
+
+// Replaces the worst hit: the highest tier, and the latest ID among those so
+// earlier entries win ties.
+fn replace_worst(out: &mut [Hit], hit: Hit) {
+    let mut worst = 0;
+    for i in 1..out.len() {
+        if (out[i].tier, out[i].id) > (out[worst].tier, out[worst].id) {
+            worst = i;
+        }
+    }
+    out[worst] = hit;
 }
 
 #[cfg(test)]

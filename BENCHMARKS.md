@@ -90,3 +90,24 @@ or the number of matches. It's the cost of visiting all 545k names, about
 to the 10 ms target, so the real search can't add much per name. The
 previous-query cache matters for this reason: while typing forward, it skips
 the full scan after the first character.
+
+### Tiers, one index
+
+`search` with exact, prefix and subsequence tiers, keeping the top 50.
+There's no quality scoring yet.
+
+| Query | Matches | Naive | Search |
+|---|---|---|---|
+| `a` | 343,805 | 8.0 ms | 13.4 ms |
+| `e` | 413,641 | 7.5 ms | 13.5 ms |
+| `readme` | 4,959 | 8.7 ms | 0.15 ms |
+| `main.rs` | 40 | 8.3 ms | 13.7 ms |
+| `cargo` | 374 | 8.6 ms | 0.6–11 ms |
+| `zzqxj` | 0 | 8.3 ms | 12.0 ms |
+| `rdm` | 202 | 8.4 ms | 14.2 ms |
+
+Most queries take 12–14 ms, about 22–26 ns per name, which is over the
+10 ms target. `readme` stops early, because 50 exact matches fill the
+results and nothing can beat them. `cargo` sometimes stops early too,
+depending on where the walk put the exact matches. That early stop goes
+away once step 3 ranks matches within a tier.

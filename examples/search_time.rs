@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use oxidex::index::Index;
 
 const RUNS: usize = 9;
+// Results a popup would show.
+const LIMIT: usize = 50;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -36,8 +38,17 @@ fn main() {
             matches = naive_contains(&index, &query);
             times.push(start.elapsed());
         }
+        let naive = median(&mut times);
+
+        let mut hits = Vec::new();
+        times.clear();
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            oxidex::search::search(&index, &query, LIMIT, &mut hits);
+            times.push(start.elapsed());
+        }
         println!(
-            "{query:?}: {matches} matches, naive {:?}",
+            "{query:?}: {matches} matches, naive {naive:?}, search {:?}",
             median(&mut times)
         );
     }
