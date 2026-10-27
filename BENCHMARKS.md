@@ -59,3 +59,34 @@ folder (55,468), as the main thread and the worker took turns sleeping and
 waking. With 12 workers the queue rarely empties and there were about 6,800.
 So one worker now crawls on the calling thread with no queue or channel.
 Between 2 and 6 workers, the walk is slower than 12 and uses more CPU than 1.
+
+## search
+
+```sh
+cargo run --release --example search_time -- <path> <query>...
+```
+
+Each query is the median of 9 runs on an index that's already in memory.
+The figures below are the median of three such runs.
+
+### Naive baseline
+
+A plain `contains` check on every lowercased name, with no tiers, scoring or
+top-`limit` selection. This is the reference the real search is measured
+against.
+
+| Query | Matches | Time |
+|---|---|---|
+| `a` | 343,726 | 8.2 ms |
+| `e` | 413,567 | 7.7 ms |
+| `readme` | 4,959 | 9.3 ms |
+| `main.rs` | 40 | 8.4 ms |
+| `cargo` | 374 | 8.9 ms |
+| `zzqxj` | 0 | 8.2 ms |
+
+`/home/mitch` (ext4), 545,552 entries. The time barely depends on the query
+or the number of matches. It's the cost of visiting all 545k names, about
+15 ns each, so that visit is the floor for a full scan. That's already close
+to the 10 ms target, so the real search can't add much per name. The
+previous-query cache matters for this reason: while typing forward, it skips
+the full scan after the first character.
