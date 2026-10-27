@@ -13,8 +13,10 @@ another listed directory are dropped, so no file is indexed twice.
 
 Results are sorted by, in order:
 
-1. **Tier**: exact, then prefix, then subsequence (fzf-style), then
-   Levenshtein.
+1. **Tier**: exact, then prefix, then Levenshtein (typos), then
+   subsequence (fzf-style). Typos rank above subsequence matches: a
+   near-miss of the whole name (`raedme` → `readme.md`) says more than the
+   query's letters scattered through a long name (`deprecatedMethod.js`).
 2. **Score** within the tier: match quality plus the scoring boosts (below),
    added together. Weights are set so match quality dominates unless a
    boost is large.
@@ -33,10 +35,11 @@ jumping, below.
 - In path mode (`docs/rea`), each folder part must subsequence-match a
   folder name on the way up the parent chain. Results are ranked by the
   file-name part only.
-- The Levenshtein tier allows edits by query length: none under 3
-  characters, 1 for 3–7 characters, 2 for 8 or more. Without that, `ab`
-  would match every name of four characters or fewer. It skips names whose
-  length difference rules them out.
+- The Levenshtein tier allows edits by query length: none under 4
+  characters, 1 for 4–7 characters, 2 for 8 or more. A 3-letter query is
+  usually an abbreviation (`rdm` for `readme`), and since typos rank above
+  subsequence matches, typo hits like `adm` would bury it. It skips names
+  whose length difference rules them out.
 - Levenshtein compares against both the stem and the whole name, and takes
   the smaller distance. The stem catches the usual typo (`slark` →
   `slack.exe`); the whole name catches typos in queries that include an
@@ -44,8 +47,11 @@ jumping, below.
 - Levenshtein counts characters, not bytes, so `cafe` is 1 edit from `café`.
 - A swap of two neighbouring letters counts as 1 edit, not 2 (optimal
   string alignment), so `raedme` finds `readme`.
-- On the main index, Levenshtein only runs when the first pass finds fewer
-  than `limit` hits.
+- Levenshtein runs in the same pass as the other tiers, for every name that
+  isn't an exact or prefix match. It used to be a second pass that only
+  ran when the first found fewer than `limit` hits, but on a real index
+  scattered subsequence matches nearly always fill `limit`, so typos were
+  never found.
 - **Open history** is searched with every tier, including Levenshtein,
   even when earlier tiers already return many results. It's small, so this
   is cheap.
@@ -120,8 +126,8 @@ first frame and the full scan fills in after:
 
 1. **Cached results**: history matches, plus the previous query's results
    filtered against the new query.
-2. **Exact, prefix and subsequence** matches from the main index.
-3. **Levenshtein** matches, only when that pass runs.
+2. **The main index**: exact, prefix, Levenshtein and subsequence
+   matches, in one pass.
 
 Each update is the full current top-`limit` list, and the popup replaces
 what it shows. History hits already have their final scores, so they don't
@@ -155,8 +161,11 @@ scanning the whole index, so typing gets faster as the query grows.
   cancelled) and the index's `Arc` hasn't been swapped since.
 - Any other edit (backspace, an edit mid-query, a switch into or out of
   path mode) does a full scan.
-- Levenshtein matches don't narrow this way, so the fuzzy pass always
-  scans in full. It only runs when earlier tiers return few results.
+- **Unsolved:** Levenshtein matches don't narrow this way. A name can be a
+  typo match for `raedme` without having matched `raedm` at all. Since
+  typos now run in the same pass, step 9 has to work out how to find typo
+  matches without a full scan. Otherwise the cache won't help queries of
+  4+ characters.
 
 ## Design
 

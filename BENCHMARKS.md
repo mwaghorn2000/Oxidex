@@ -152,3 +152,24 @@ costs 14–35 ms on top of the first pass. Most of that is the second visit to
 all 545k names plus an edit-distance table for every name within `max`
 characters of the query's length. Long queries with 2 edits and non-ASCII
 queries (decoding every name) are the worst cases.
+
+### Typos in the first pass
+
+Typos now rank above subsequence matches, and are checked in the same pass
+for queries of 4+ characters. The second pass is gone.
+
+| Query | Typo check? | Step 6 | Now |
+|---|---|---|---|
+| `a` | no (too short) | 14.1 ms | 13.9 ms |
+| `rdm` | no (too short) | 19.4 ms | 18.7 ms |
+| `readme` | yes | 19.2 ms | 28.0 ms |
+| `main.rs` | yes | 17.1 ms | 27.4 ms |
+| `zzqxj` | yes | 29.2 ms | 23.3 ms |
+| `café` | yes | 50.0 ms | 42.3 ms |
+| `docuemntation` | yes | 48.5 ms | 41.1 ms |
+
+Worst cases got faster, because there's no second scan. Typical queries of
+4+ characters got about 9 ms slower, because every name that isn't an exact
+or prefix match now gets a length check and, if its length is close to the
+query's, an edit-distance table. This is the biggest single cost to look at
+when optimising.
