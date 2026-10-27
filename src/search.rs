@@ -30,6 +30,7 @@ pub enum Tier {
     // The query's characters appear in the name in order, with gaps allowed.
     Subsequence,
     // Within a few typos (edits) of the name, with or without its extension.
+    // A swap of two neighbouring letters counts as one edit.
     Levenshtein,
 }
 
@@ -156,7 +157,7 @@ pub fn search(
     // matched are skipped.
     let max_edits = max_edits(query_chars.len());
     if out.len() < limit && max_edits > 0 {
-        let mut rows = (Vec::new(), Vec::new());
+        let mut rows = (Vec::new(), Vec::new(), Vec::new());
         for (number, index) in indexes.iter().enumerate() {
             let number = number as u32;
             let mut id = 0;
@@ -219,7 +220,7 @@ fn typo_edits(
     query_chars: &[char],
     max: usize,
     name_chars: &mut Vec<char>,
-    rows: &mut (Vec<usize>, Vec<usize>),
+    rows: &mut (Vec<usize>, Vec<usize>, Vec<usize>),
 ) -> Option<usize> {
     let stem = stem_of(name);
     let has_ext = stem.len() < name.len();
@@ -244,22 +245,25 @@ fn typo_edits(
     whole.into_iter().chain(stem).min()
 }
 
-// Levenshtein distance between `a` and `b` if it's at most `max`, else
-// `None`. Gives up early: when the length difference alone is over `max`, or
-// when every cell in a row is, since later rows can only grow. Generic for
-// the same bytes-or-`char`s reason as `subsequence_score`.
+// Edit distance between `a` and `b` if it's at most `max`, else `None`.
+// Levenshtein, plus a swap of two neighbouring letters counts as one edit
+// (optimal string alignment), since swaps are the most common typo. Gives up
+// early: when the length difference alone is over `max`, or when every cell
+// in a row is, since later rows can't be lower. Generic for the same
+// bytes-or-`char`s reason as `subsequence_score`.
 fn edit_distance<T: Copy + PartialEq>(
     a: &[T],
     b: &[T],
     max: usize,
-    rows: &mut (Vec<usize>, Vec<usize>),
+    rows: &mut (Vec<usize>, Vec<usize>, Vec<usize>),
 ) -> Option<usize> {
     if a.len().abs_diff(b.len()) > max {
         return None;
     }
-    // Two rows of the usual table: `prev` for the last character of `a`,
-    // `curr` for this one.
-    let (prev, curr) = rows;
+    // Three rows of the usual table: `curr` for this character of `a`, `prev`
+    // for the one before, and `prev2` before that, which swaps look back to.
+    let (prev2, prev, curr) = rows;
+    prev2.clear();
     prev.clear();
     prev.extend(0..=b.len());
     for (i, &x) in a.iter().enumerate() {
@@ -268,13 +272,17 @@ fn edit_distance<T: Copy + PartialEq>(
         let mut row_min = i + 1;
         for (j, &y) in b.iter().enumerate() {
             let substitute = prev[j] + usize::from(x != y);
-            let cell = substitute.min(prev[j + 1] + 1).min(curr[j] + 1);
+            let mut cell = substitute.min(prev[j + 1] + 1).min(curr[j] + 1);
+            if i > 0 && j > 0 && x == b[j - 1] && a[i - 1] == y {
+                cell = cell.min(prev2[j - 1] + 1);
+            }
             curr.push(cell);
             row_min = row_min.min(cell);
         }
         if row_min > max {
             return None;
         }
+        std::mem::swap(prev2, prev);
         std::mem::swap(prev, curr);
     }
     let distance = prev[b.len()];
@@ -714,6 +722,12 @@ mod tests {
     #[test]
     fn extra_letter_matches() {
         assert_eq!(tier_of(&["slack.exe"], "slacck"), Some(Tier::Levenshtein));
+    }
+
+    // Plain Levenshtein counts a swap as 2 edits, over the 1 allowed here.
+    #[test]
+    fn swapped_letters_are_one_edit() {
+        assert_eq!(tier_of(&["readme.md"], "raedme"), Some(Tier::Levenshtein));
     }
 
     // "maim.rs" is 3 edits from the stem "main", but 1 from the whole name.

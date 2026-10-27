@@ -42,6 +42,8 @@ jumping, below.
   `slack.exe`); the whole name catches typos in queries that include an
   extension (`maim.rs` → `main.rs`).
 - Levenshtein counts characters, not bytes, so `cafe` is 1 edit from `café`.
+- A swap of two neighbouring letters counts as 1 edit, not 2 (optimal
+  string alignment), so `raedme` finds `readme`.
 - On the main index, Levenshtein only runs when the first pass finds fewer
   than `limit` hits.
 - **Open history** is searched with every tier, including Levenshtein,
