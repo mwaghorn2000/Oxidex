@@ -1,4 +1,5 @@
-// Filename search over one `Index`. See RANKING.md for the full plan.
+// Filename search over a list of indexes, one per search directory, ranked
+// together. See RANKING.md for the full plan.
 //
 // Results are ranked in three layers, each with its own place to extend:
 //
@@ -31,6 +32,9 @@ pub enum Tier {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
+    // Position of the hit's index in the slice passed to `search`.
+    pub index: u32,
+    // Entry ID within that index.
     pub id: u32,
     pub tier: Tier,
     // How good the hit is within its tier. Higher is better. For now this
@@ -47,10 +51,10 @@ const CONSECUTIVE: i32 = 8;
 const GAP_START: i32 = 3;
 const GAP_EXTEND: i32 = 1;
 
-// Fills `out` with up to `limit` hits for `query`, best first. An exact
-// match is the whole name or the name without its extension. Matching is
-// case-insensitive.
-pub fn search(index: &Index, query: &str, limit: usize, out: &mut Vec<Hit>) {
+// Fills `out` with up to `limit` hits for `query` from all of `indexes`,
+// best first. An exact match is the whole name or the name without its
+// extension. Matching is case-insensitive.
+pub fn search(indexes: &[Index], query: &str, limit: usize, out: &mut Vec<Hit>) {
     out.clear();
     if query.is_empty() || limit == 0 {
         return;
@@ -66,31 +70,45 @@ pub fn search(index: &Index, query: &str, limit: usize, out: &mut Vec<Hit>) {
 
     // Keep only the best `limit` hits instead of collecting and sorting every
     // match: a one-letter query matches most of the index. `worst` is the
-    // position of the worst kept hit, once `out` is full.
+    // position of the worst kept hit, once `out` is full. It's shared across
+    // indexes, so they compete for the same `limit` places.
     let mut worst = None;
-    let mut id = 0;
-    while let Some(name) = index.name(id) {
-        if let Some((tier, score)) = match_name(name, &query, ascii, &query_chars, &mut name_chars)
-        {
-            // RANKING SIGNALS: new signals (modified time, frecency, ...)
-            // add to `score` here, before the hit competes for a place in
-            // `out`. See the top of this file.
-            let hit = Hit { id, tier, score };
-            if out.len() < limit {
-                out.push(hit);
-                if out.len() == limit {
-                    worst = Some(find_worst(index, out));
-                }
-            } else if let Some(w) = worst
-                && compare(index, &hit, &out[w]) == Ordering::Less
+    for (number, index) in indexes.iter().enumerate() {
+        let mut id = 0;
+        while let Some(name) = index.name(id) {
+            if let Some((tier, score)) =
+                match_name(name, &query, ascii, &query_chars, &mut name_chars)
             {
-                out[w] = hit;
-                worst = Some(find_worst(index, out));
+                // RANKING SIGNALS: new signals (modified time, frecency, ...)
+                // add to `score` here, before the hit competes for a place in
+                // `out`. See the top of this file.
+                let hit = Hit {
+                    index: number as u32,
+                    id,
+                    tier,
+                    score,
+                };
+                keep(indexes, limit, out, &mut worst, hit);
             }
+            id += 1;
         }
-        id += 1;
     }
-    out.sort_by(|a, b| compare(index, a, b));
+    out.sort_by(|a, b| compare(indexes, a, b));
+}
+
+// Adds `hit` to `out` if there's room or it beats the worst kept hit.
+fn keep(indexes: &[Index], limit: usize, out: &mut Vec<Hit>, worst: &mut Option<usize>, hit: Hit) {
+    if out.len() < limit {
+        out.push(hit);
+        if out.len() == limit {
+            *worst = Some(find_worst(indexes, out));
+        }
+    } else if let Some(w) = *worst
+        && compare(indexes, &hit, &out[w]) == Ordering::Less
+    {
+        out[w] = hit;
+        *worst = Some(find_worst(indexes, out));
+    }
 }
 
 // Decides the tier and match quality (0 to 1000) of `name`, or `None` if it
@@ -197,34 +215,39 @@ fn is_separator(c: char) -> bool {
 }
 
 // The full result order. Best first: tier, then score, then shorter name,
-// then shallower path, then earlier entry. Name length and depth are only
-// looked up on a tie, so the common case stays cheap. Ranking signals belong
-// in `Hit::score`, not here: see the top of this file.
-fn compare(index: &Index, a: &Hit, b: &Hit) -> Ordering {
+// then shallower path, then earlier index, then earlier entry. Name length
+// and depth are only looked up on a tie, so the common case stays cheap.
+// Ranking signals belong in `Hit::score`, not here: see the top of this file.
+fn compare(indexes: &[Index], a: &Hit, b: &Hit) -> Ordering {
     a.tier
         .cmp(&b.tier)
         .then(b.score.cmp(&a.score))
-        .then_with(|| name_len(index, a.id).cmp(&name_len(index, b.id)))
-        .then_with(|| depth(index, a.id).cmp(&depth(index, b.id)))
+        .then_with(|| name_len(indexes, a).cmp(&name_len(indexes, b)))
+        .then_with(|| depth(indexes, a).cmp(&depth(indexes, b)))
+        .then(a.index.cmp(&b.index))
         .then(a.id.cmp(&b.id))
 }
 
 // A missing entry sorts last rather than panicking.
-fn name_len(index: &Index, id: u32) -> usize {
-    index.name(id).map_or(usize::MAX, str::len)
+fn name_len(indexes: &[Index], hit: &Hit) -> usize {
+    let name = indexes.get(hit.index as usize).and_then(|i| i.name(hit.id));
+    name.map_or(usize::MAX, str::len)
 }
 
 // An entry whose parents form a cycle has no depth, so it sorts last.
-fn depth(index: &Index, id: u32) -> u32 {
-    index.depth(id).unwrap_or(u32::MAX)
+fn depth(indexes: &[Index], hit: &Hit) -> u32 {
+    let depth = indexes
+        .get(hit.index as usize)
+        .and_then(|i| i.depth(hit.id));
+    depth.unwrap_or(u32::MAX)
 }
 
 // Position of the worst hit in `out`. A linear scan is fine: `out` holds
 // only `limit` hits, and this only runs when a better hit replaces one.
-fn find_worst(index: &Index, out: &[Hit]) -> usize {
+fn find_worst(indexes: &[Index], out: &[Hit]) -> usize {
     let mut worst = 0;
     for i in 1..out.len() {
-        if compare(index, &out[i], &out[worst]) == Ordering::Greater {
+        if compare(indexes, &out[i], &out[worst]) == Ordering::Greater {
             worst = i;
         }
     }
@@ -248,7 +271,7 @@ mod tests {
     // Display name and tier of each hit, in result order.
     fn results(index: &Index, query: &str, limit: usize) -> Vec<(String, Tier)> {
         let mut out = Vec::new();
-        search(index, query, limit, &mut out);
+        search(std::slice::from_ref(index), query, limit, &mut out);
         out.iter()
             .map(|hit| (index.display_name(hit.id).unwrap().to_string(), hit.tier))
             .collect()
@@ -403,7 +426,7 @@ mod tests {
         let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
         let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
         let mut out = Vec::new();
-        search(&index, "a.txt", 10, &mut out);
+        search(&[index], "a.txt", 10, &mut out);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [shallow, deep]);
     }
@@ -415,7 +438,7 @@ mod tests {
         let first = index.push("a.txt", root, false, 0, 0).unwrap();
         let second = index.push("a.txt", root, false, 0, 0).unwrap();
         let mut out = Vec::new();
-        search(&index, "a.txt", 10, &mut out);
+        search(&[index], "a.txt", 10, &mut out);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [first, second]);
     }
@@ -426,5 +449,62 @@ mod tests {
     fn limit_keeps_best_quality() {
         let index = index_of(&["readme.txt", "readme"]);
         assert_eq!(names(&index, "readme", 1), ["readme"]);
+    }
+
+    // Index number and display name of each hit, in result order.
+    fn hits_across(indexes: &[Index], query: &str, limit: usize) -> Vec<(u32, String)> {
+        let mut out = Vec::new();
+        search(indexes, query, limit, &mut out);
+        out.iter()
+            .map(|hit| {
+                let name = indexes[hit.index as usize].display_name(hit.id).unwrap();
+                (hit.index, name.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_indexes_returns_nothing() {
+        assert!(hits_across(&[], "readme", 10).is_empty());
+    }
+
+    #[test]
+    fn searches_every_index() {
+        let indexes = [index_of(&["a.txt"]), index_of(&["b.txt"])];
+        assert_eq!(
+            hits_across(&indexes, "txt", 10),
+            [(0, "a.txt".to_string()), (1, "b.txt".to_string())]
+        );
+    }
+
+    // The better match is in the later index, so ranking must happen across
+    // indexes, not one index after another.
+    #[test]
+    fn indexes_are_ranked_together() {
+        let indexes = [index_of(&["xrxexaxd"]), index_of(&["read"])];
+        assert_eq!(
+            hits_across(&indexes, "read", 10),
+            [(1, "read".to_string()), (0, "xrxexaxd".to_string())]
+        );
+    }
+
+    #[test]
+    fn limit_applies_across_indexes() {
+        let indexes = [index_of(&["readme_old_backup"]), index_of(&["readme"])];
+        assert_eq!(
+            hits_across(&indexes, "readme", 1),
+            [(1, "readme".to_string())]
+        );
+    }
+
+    // Both entries have the same ID in their own index, so the tiebreak must
+    // use the index number and not just the ID.
+    #[test]
+    fn ties_go_to_earlier_index() {
+        let indexes = [index_of(&["a.txt"]), index_of(&["a.txt"])];
+        assert_eq!(
+            hits_across(&indexes, "a.txt", 10),
+            [(0, "a.txt".to_string()), (1, "a.txt".to_string())]
+        );
     }
 }
