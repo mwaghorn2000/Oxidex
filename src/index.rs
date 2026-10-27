@@ -89,6 +89,21 @@ impl Index {
 
         Some(parts.iter().rev().collect())
     }
+
+    // Number of folders above `id`, so a root is 0.
+    pub fn depth(&self, id: u32) -> Option<u32> {
+        let mut depth = 0;
+        let mut curr = self.entries.get(id as usize)?.parent;
+        while curr != u32::MAX {
+            // As in `full_path`, a chain longer than the index is a cycle.
+            if depth as usize >= self.entries.len() {
+                return None;
+            }
+            curr = self.entries.get(curr as usize)?.parent;
+            depth += 1;
+        }
+        Some(depth)
+    }
 }
 
 impl Default for Index {
@@ -257,5 +272,24 @@ mod tests {
         let b = index.push("b.txt", root, false, 0, 0).unwrap();
         assert_eq!(index.full_path(a), Some(Path::new("c").join("a.txt")));
         assert_eq!(index.full_path(b), Some(Path::new("c").join("b.txt")));
+    }
+
+    #[test]
+    fn depth_counts_parents() {
+        let mut index = Index::new();
+        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let docs = index.push("docs", root, true, 0, 0).unwrap();
+        let file = index.push("a.txt", docs, false, 0, 0).unwrap();
+        assert_eq!(index.depth(root), Some(0));
+        assert_eq!(index.depth(file), Some(2));
+        assert_eq!(index.depth(file + 1), None);
+    }
+
+    #[test]
+    fn depth_with_parent_cycle_is_none() {
+        let mut index = Index::new();
+        let a = index.push("a", 1, true, 0, 0).unwrap();
+        index.push("b", 0, true, 0, 0).unwrap();
+        assert_eq!(index.depth(a), None);
     }
 }
