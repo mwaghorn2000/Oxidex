@@ -1,12 +1,31 @@
+// Filename search over one `Index`. See RANKING.md for the full plan.
+//
+// Results are ranked in three layers, each with its own place to extend:
+//
+// 1. Tier (`Tier`, decided in `match_name`): what kind of match it is. A
+//    new kind of match, like the Levenshtein pass, is a new `Tier` variant
+//    and a new check in `match_name`.
+// 2. Score (`Hit::score`): how good the match is within its tier. Match
+//    quality comes from `match_name`. New ranking signals (modified time,
+//    frecency, ...) are added on top where the `Hit` is built in `search`,
+//    marked "RANKING SIGNALS". They will be `Scorer` implementations
+//    (RANKING.md, build step 7). Don't put them in `match_name` or `compare`.
+// 3. Tiebreaks (`compare`): only for hits with equal tier and score, so the
+//    order never shuffles between searches. Not a place for ranking signals.
 use std::cmp::Ordering;
 
 use crate::index::Index;
 
-// Ordered best first, so sorting by tier puts exact matches on top.
+// Ordered best first, so sorting by tier puts exact matches on top. Tiers
+// are strict: a hit in a better tier always ranks above one in a worse tier,
+// whatever their scores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
+    // The whole name, or the name without its extension.
     Exact,
+    // The start of the name.
     Prefix,
+    // The query's characters appear in the name in order, with gaps allowed.
     Subsequence,
 }
 
@@ -14,7 +33,8 @@ pub enum Tier {
 pub struct Hit {
     pub id: u32,
     pub tier: Tier,
-    // Match quality within the tier, 0 to 1000. Higher is better.
+    // How good the hit is within its tier. Higher is better. For now this
+    // is match quality alone, 0 to 1000; ranking signals will add to it.
     pub score: i32,
 }
 
@@ -44,12 +64,17 @@ pub fn search(index: &Index, query: &str, limit: usize, out: &mut Vec<Hit>) {
     let query_chars: Vec<char> = query.chars().collect();
     let mut name_chars = Vec::new();
 
-    // Position of the worst hit in `out`, once `out` is full.
+    // Keep only the best `limit` hits instead of collecting and sorting every
+    // match: a one-letter query matches most of the index. `worst` is the
+    // position of the worst kept hit, once `out` is full.
     let mut worst = None;
     let mut id = 0;
     while let Some(name) = index.name(id) {
         if let Some((tier, score)) = match_name(name, &query, ascii, &query_chars, &mut name_chars)
         {
+            // RANKING SIGNALS: new signals (modified time, frecency, ...)
+            // add to `score` here, before the hit competes for a place in
+            // `out`. See the top of this file.
             let hit = Hit { id, tier, score };
             if out.len() < limit {
                 out.push(hit);
@@ -68,6 +93,10 @@ pub fn search(index: &Index, query: &str, limit: usize, out: &mut Vec<Hit>) {
     out.sort_by(|a, b| compare(index, a, b));
 }
 
+// Decides the tier and match quality (0 to 1000) of `name`, or `None` if it
+// doesn't match. Checks run best tier first, so a name gets its best tier.
+// `query` is lowercased; `query_chars` is the same query as `char`s, and
+// `name_chars` is a reused buffer, both only used for non-ASCII queries.
 fn match_name(
     name: &str,
     query: &str,
@@ -80,6 +109,7 @@ fn match_name(
         Some(dot) if dot > 0 => &name[..dot],
         _ => name,
     };
+    // A whole-name match ranks just above a match without the extension.
     if name == query {
         return Some((Tier::Exact, 1000));
     }
@@ -102,7 +132,8 @@ fn match_name(
 }
 
 // Scores the tightest match of `query` in `name`, or `None` if it isn't a
-// subsequence. `query` must not be empty.
+// subsequence. `query` must not be empty. Generic so the same code matches
+// bytes (ASCII queries) and `char`s (everything else).
 fn subsequence_score<T: Copy + PartialEq + Into<char>>(name: &[T], query: &[T]) -> Option<i32> {
     // Forward pass: where the first complete match ends.
     let mut q = 0;
@@ -132,6 +163,8 @@ fn subsequence_score<T: Copy + PartialEq + Into<char>>(name: &[T], query: &[T]) 
         }
     }
 
+    // Score the match inside `start..=end`. The weights are the constants at
+    // the top of the file; tune them there.
     let mut score = 0;
     let mut q = 0;
     let mut prev: Option<usize> = None;
@@ -157,12 +190,16 @@ fn subsequence_score<T: Copy + PartialEq + Into<char>>(name: &[T], query: &[T]) 
     Some((score.max(0) * 1000 / best).min(1000))
 }
 
+// Characters that start a new word in a file name, for the word-start bonus.
+// Names are lowercased, so camelCase word starts aren't visible here.
 fn is_separator(c: char) -> bool {
     matches!(c, '.' | '_' | '-' | ' ')
 }
 
-// Best first: tier, then score, then shorter name, then shallower path, then
-// earlier entry. Name length and depth are only looked up on a tie.
+// The full result order. Best first: tier, then score, then shorter name,
+// then shallower path, then earlier entry. Name length and depth are only
+// looked up on a tie, so the common case stays cheap. Ranking signals belong
+// in `Hit::score`, not here: see the top of this file.
 fn compare(index: &Index, a: &Hit, b: &Hit) -> Ordering {
     a.tier
         .cmp(&b.tier)
@@ -172,14 +209,18 @@ fn compare(index: &Index, a: &Hit, b: &Hit) -> Ordering {
         .then(a.id.cmp(&b.id))
 }
 
+// A missing entry sorts last rather than panicking.
 fn name_len(index: &Index, id: u32) -> usize {
     index.name(id).map_or(usize::MAX, str::len)
 }
 
+// An entry whose parents form a cycle has no depth, so it sorts last.
 fn depth(index: &Index, id: u32) -> u32 {
     index.depth(id).unwrap_or(u32::MAX)
 }
 
+// Position of the worst hit in `out`. A linear scan is fine: `out` holds
+// only `limit` hits, and this only runs when a better hit replaces one.
 fn find_worst(index: &Index, out: &[Hit]) -> usize {
     let mut worst = 0;
     for i in 1..out.len() {
