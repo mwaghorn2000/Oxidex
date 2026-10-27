@@ -116,6 +116,12 @@ impl Index {
         Some(parts.iter().rev().collect())
     }
 
+    // The folder `id` is in, or `None` for a root.
+    pub fn parent(&self, id: u32) -> Option<u32> {
+        let parent = self.entries.get(id as usize)?.parent;
+        (parent != u32::MAX).then_some(parent)
+    }
+
     // Seconds since 1970, or 0 if the OS couldn't say.
     pub fn modified(&self, id: u32) -> Option<u64> {
         Some(self.entries.get(id as usize)?.modified)
@@ -326,6 +332,16 @@ mod tests {
         let a = index.push("a", 1, true, 0, 0).unwrap();
         index.push("b", 0, true, 0, 0).unwrap();
         assert_eq!(index.depth(a), None);
+    }
+
+    #[test]
+    fn parent_returns_folder_above() {
+        let mut index = Index::new();
+        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let file = index.push("a.txt", root, false, 0, 0).unwrap();
+        assert_eq!(index.parent(file), Some(root));
+        assert_eq!(index.parent(root), None);
+        assert_eq!(index.parent(file + 1), None);
     }
 
     #[test]
