@@ -3,9 +3,9 @@
 //
 // Results are ranked in three layers, each with its own place to extend:
 //
-// 1. Tier (`Tier`, decided in `match_name`): what kind of match it is. A
-//    new kind of match, like the Levenshtein pass, is a new `Tier` variant
-//    and a new check in `match_name`.
+// 1. Tier (`Tier`): what kind of match it is. A new kind of match is a new
+//    `Tier` variant plus a check in `match_name`, or, if it should only run
+//    sometimes, a separate pass in `search` like the typo pass.
 // 2. Score (`Hit::score`): how good the match is within its tier. Match
 //    quality comes from `match_name`. New ranking signals (modified time,
 //    frecency, ...) are added on top where the `Hit` is built in `search`,
@@ -29,6 +29,8 @@ pub enum Tier {
     Prefix,
     // The query's characters appear in the name in order, with gaps allowed.
     Subsequence,
+    // Within a few typos (edits) of the name, with or without its extension.
+    Levenshtein,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,8 +149,136 @@ pub fn search(
             id += 1;
         }
     }
+
+    // Typo pass. Edit distance is far slower than the checks above, so it
+    // only runs when they found too few hits to fill `out`. In that case
+    // `out` holds every earlier-tier match, which is how names that already
+    // matched are skipped.
+    let max_edits = max_edits(query_chars.len());
+    if out.len() < limit && max_edits > 0 {
+        let mut rows = (Vec::new(), Vec::new());
+        for (number, index) in indexes.iter().enumerate() {
+            let number = number as u32;
+            let mut id = 0;
+            while let Some(name) = index.name(id) {
+                if id % CANCEL_CHECK_EVERY == 0 && cancel.is_cancelled() {
+                    out.clear();
+                    return Err(Cancelled);
+                }
+                let edits = typo_edits(
+                    name,
+                    &query,
+                    ascii,
+                    &query_chars,
+                    max_edits,
+                    &mut name_chars,
+                    &mut rows,
+                );
+                if let Some(edits) = edits
+                    && !out.iter().any(|h| h.index == number && h.id == id)
+                {
+                    // One edit scores 1000, two score 500. Zero edits would
+                    // be an exact match, already in `out`.
+                    let score = 1000 / edits.max(1) as i32;
+                    // RANKING SIGNALS: add to `score` here too, as above.
+                    let hit = Hit {
+                        index: number,
+                        id,
+                        tier: Tier::Levenshtein,
+                        score,
+                    };
+                    keep(indexes, limit, out, &mut worst, hit);
+                }
+                id += 1;
+            }
+        }
+    }
+
     out.sort_by(|a, b| compare(indexes, a, b));
     Ok(())
+}
+
+// Typo allowance by query length in characters. Short queries get none, or
+// "ab" would match every name of four characters or fewer. Capped at 2.
+fn max_edits(query_len: usize) -> usize {
+    match query_len {
+        0..=2 => 0,
+        3..=7 => 1,
+        _ => 2,
+    }
+}
+
+// Fewest edits between `query` and either the whole name or its stem, if no
+// more than `max`. The stem is what people usually mistype ("slark" for
+// "slack.exe"); the whole name covers typos in queries with an extension.
+// `rows` is a reused buffer for `edit_distance`.
+fn typo_edits(
+    name: &str,
+    query: &str,
+    ascii: bool,
+    query_chars: &[char],
+    max: usize,
+    name_chars: &mut Vec<char>,
+    rows: &mut (Vec<usize>, Vec<usize>),
+) -> Option<usize> {
+    let stem = stem_of(name);
+    let has_ext = stem.len() < name.len();
+    // Unlike the subsequence check, an ASCII query needs `char`s here when
+    // the name isn't ASCII: 'é' is two bytes, so bytes would count it twice.
+    if ascii && name.is_ascii() {
+        let whole = edit_distance(name.as_bytes(), query.as_bytes(), max, rows);
+        if !has_ext {
+            return whole;
+        }
+        let stem = edit_distance(stem.as_bytes(), query.as_bytes(), max, rows);
+        return whole.into_iter().chain(stem).min();
+    }
+    name_chars.clear();
+    name_chars.extend(name.chars());
+    let whole = edit_distance(name_chars, query_chars, max, rows);
+    if !has_ext {
+        return whole;
+    }
+    let stem_len = stem.chars().count();
+    let stem = edit_distance(&name_chars[..stem_len], query_chars, max, rows);
+    whole.into_iter().chain(stem).min()
+}
+
+// Levenshtein distance between `a` and `b` if it's at most `max`, else
+// `None`. Gives up early: when the length difference alone is over `max`, or
+// when every cell in a row is, since later rows can only grow. Generic for
+// the same bytes-or-`char`s reason as `subsequence_score`.
+fn edit_distance<T: Copy + PartialEq>(
+    a: &[T],
+    b: &[T],
+    max: usize,
+    rows: &mut (Vec<usize>, Vec<usize>),
+) -> Option<usize> {
+    if a.len().abs_diff(b.len()) > max {
+        return None;
+    }
+    // Two rows of the usual table: `prev` for the last character of `a`,
+    // `curr` for this one.
+    let (prev, curr) = rows;
+    prev.clear();
+    prev.extend(0..=b.len());
+    for (i, &x) in a.iter().enumerate() {
+        curr.clear();
+        curr.push(i + 1);
+        let mut row_min = i + 1;
+        for (j, &y) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(x != y);
+            let cell = substitute.min(prev[j + 1] + 1).min(curr[j] + 1);
+            curr.push(cell);
+            row_min = row_min.min(cell);
+        }
+        if row_min > max {
+            return None;
+        }
+        std::mem::swap(prev, curr);
+    }
+    let distance = prev[b.len()];
+    (distance <= max).then_some(distance)
 }
 
 // Adds `hit` to `out` if there's room or it beats the worst kept hit.
@@ -177,11 +307,7 @@ fn match_name(
     query_chars: &[char],
     name_chars: &mut Vec<char>,
 ) -> Option<(Tier, i32)> {
-    // A leading dot starts the name (".bashrc"), not an extension.
-    let stem = match name.rfind('.') {
-        Some(dot) if dot > 0 => &name[..dot],
-        _ => name,
-    };
+    let stem = stem_of(name);
     // A whole-name match ranks just above a match without the extension.
     if name == query {
         return Some((Tier::Exact, 1000));
@@ -202,6 +328,15 @@ fn match_name(
         subsequence_score(name_chars, query_chars)
     }?;
     Some((Tier::Subsequence, score))
+}
+
+// The name without its extension. A leading dot starts the name
+// (".bashrc"), not an extension.
+fn stem_of(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => &name[..dot],
+        _ => name,
+    }
 }
 
 // Scores the tightest match of `query` in `name`, or `None` if it isn't a
@@ -569,6 +704,77 @@ mod tests {
             hits_across(&indexes, "a.txt", 10),
             [(0, "a.txt".to_string()), (1, "a.txt".to_string())]
         );
+    }
+
+    #[test]
+    fn one_typo_matches() {
+        assert_eq!(tier_of(&["slack.exe"], "slark"), Some(Tier::Levenshtein));
+    }
+
+    #[test]
+    fn extra_letter_matches() {
+        assert_eq!(tier_of(&["slack.exe"], "slacck"), Some(Tier::Levenshtein));
+    }
+
+    // "maim.rs" is 3 edits from the stem "main", but 1 from the whole name.
+    #[test]
+    fn typo_against_whole_name_matches() {
+        assert_eq!(tier_of(&["main.rs"], "maim.rs"), Some(Tier::Levenshtein));
+    }
+
+    #[test]
+    fn short_query_allows_one_edit() {
+        assert_eq!(tier_of(&["slack.exe"], "sxaxk"), None);
+    }
+
+    #[test]
+    fn long_query_allows_two_edits() {
+        let tier = tier_of(&["documentation.pdf"], "docuemntation");
+        assert_eq!(tier, Some(Tier::Levenshtein));
+    }
+
+    #[test]
+    fn very_short_query_has_no_typo_matching() {
+        assert_eq!(tier_of(&["ac"], "ab"), None);
+    }
+
+    // 'é' is two bytes, so comparing bytes would count this as two edits.
+    #[test]
+    fn typo_counts_characters_not_bytes() {
+        assert_eq!(tier_of(&["café.txt"], "cafe"), Some(Tier::Levenshtein));
+    }
+
+    #[test]
+    fn typos_rank_below_other_tiers() {
+        let index = index_of(&["slick", "slack_notes"]);
+        let hits = results(&index, "slack", 10);
+        assert_eq!(
+            hits,
+            [
+                ("slack_notes".to_string(), Tier::Prefix),
+                ("slick".to_string(), Tier::Levenshtein),
+            ]
+        );
+    }
+
+    // Enough earlier-tier matches to fill `limit`, so the typo pass is skipped.
+    #[test]
+    fn typo_pass_skipped_when_enough_results() {
+        let index = index_of(&["slick", "slack_notes"]);
+        assert_eq!(names(&index, "slack", 1), ["slack_notes"]);
+    }
+
+    #[test]
+    fn fewer_edits_rank_higher() {
+        let index = index_of(&["notexooxs", "notebooxs"]);
+        assert_eq!(names(&index, "notebooks", 10), ["notebooxs", "notexooxs"]);
+    }
+
+    // The exact match is also 0 edits from the query; it must appear once.
+    #[test]
+    fn earlier_tier_match_is_not_repeated() {
+        let index = index_of(&["slack.exe", "slick"]);
+        assert_eq!(names(&index, "slack", 10), ["slack.exe", "slick"]);
     }
 
     #[test]

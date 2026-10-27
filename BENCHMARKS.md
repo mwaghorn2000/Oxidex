@@ -132,3 +132,23 @@ Queries with no early stop are 1–3 ms slower than step 2, so 15–18 ms. The
 `readme` and `cargo` speedups are gone, as expected now that a full set of
 exact matches no longer stops the scan. Non-ASCII queries are the slowest,
 because every name is decoded into `char`s before the subsequence check.
+
+### Typo pass
+
+Step 6 adds the Levenshtein tier. It's a second full scan that only runs when
+the first pass finds fewer than 50 hits.
+
+| Query | Typo pass runs? | Step 5 | Step 6 |
+|---|---|---|---|
+| `a` | no | 13.1 ms | 14.1 ms |
+| `readme` | no | 17.7 ms | 19.2 ms |
+| `rdm` | no | 17.9 ms | 19.4 ms |
+| `zzqxj` | yes, 1 edit | 14.8 ms | 29.2 ms |
+| `café` | yes, 1 edit, non-ASCII | 27.0 ms | 50.0 ms |
+| `docuemntation` | yes, 2 edits | — | 48.5 ms |
+
+Queries that skip the pass are within noise of step 5. When the pass runs it
+costs 14–35 ms on top of the first pass. Most of that is the second visit to
+all 545k names plus an edit-distance table for every name within `max`
+characters of the query's length. Long queries with 2 edits and non-ASCII
+queries (decoding every name) are the worst cases.
