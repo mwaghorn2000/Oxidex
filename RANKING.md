@@ -242,6 +242,17 @@ complicated.
 
 ## TODO
 
+- **Typos in a partly typed name lose every result.** `the binding of isc`
+  finds `The Binding of Isaac Rebirth.url` as a subsequence match, but one
+  more wrong letter (`the binding of iscac`, 1 edit from `isaac`) finds
+  nothing. It's no longer a subsequence, and the typo check only compares
+  against the whole name or stem: 28 characters against the query's 20, far
+  over the 2-edit limit on length alone. Likely fix: also compare against
+  the start of the name (prefix edit distance), as planned for history
+  entries. Typo matching then works while the name is still being typed.
+  The mask filter stays valid, because each missing character still costs
+  at least one edit.
+
 - **Multi-word search.** fzf-style, where `foo bar` matches names
   containing both words in any order. Until then, spaces are literal.
 - **Accent folding**, so `cafe` matches `café`.
