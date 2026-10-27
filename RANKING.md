@@ -33,11 +33,17 @@ jumping, below.
 - In path mode (`docs/rea`), each folder part must subsequence-match a
   folder name on the way up the parent chain. Results are ranked by the
   file-name part only.
-- The Levenshtein tier is capped at 2 edits, and it skips names whose
+- The Levenshtein tier allows edits by query length: none under 3
+  characters, 1 for 3–7 characters, 2 for 8 or more. Without that, `ab`
+  would match every name of four characters or fewer. It skips names whose
   length difference rules them out.
-- Levenshtein compares against the name's stem and ignores the extension.
-- On the main index, Levenshtein only runs when earlier tiers return few
-  results.
+- Levenshtein compares against both the stem and the whole name, and takes
+  the smaller distance. The stem catches the usual typo (`slark` →
+  `slack.exe`); the whole name catches typos in queries that include an
+  extension (`maim.rs` → `main.rs`).
+- Levenshtein counts characters, not bytes, so `cafe` is 1 edit from `café`.
+- On the main index, Levenshtein only runs when the first pass finds fewer
+  than `limit` hits.
 - **Open history** is searched with every tier, including Levenshtein,
   even when earlier tiers already return many results. It's small, so this
   is cheap.
@@ -56,7 +62,7 @@ How results are ranked within each tier, before boosts:
   right after `.` `_` `-` or a space, and for runs of consecutive matched
   characters. Gaps cost points. No camelCase bonus, because names are
   lowercased in the index.
-- **Levenshtein:** fewer edits is better.
+- **Levenshtein:** fewer edits is better: 1 edit scores 1000, 2 score 500.
 
 Folders and files are ranked the same way, with no penalty or bonus for
 either.
@@ -161,13 +167,46 @@ shouldn't touch the rest of the search code.
   one obvious place.
 - Adding a signal means writing a new implementation and registering it.
 
-Open questions:
+The plan, in `src/score.rs`:
 
-- **Dispatch.** `Vec<Box<dyn Scorer>>` is the most flexible but adds a
-  virtual call per candidate. Calling a fixed set of scorers directly
-  avoids that. Benchmark both before choosing.
-- **Tier jumping in the trait.** Frecency can move a result into another
-  tier, so the trait may need more than a plain score boost.
+```rust
+// Everything a scorer may look at for one matched entry. New fields can be
+// added without changing existing scorers.
+pub struct Candidate<'a> {
+    pub index: &'a Index,
+    pub id: u32,
+    pub tier: Tier,
+    pub quality: i32,                       // from the matcher
+    pub history: Option<&'a HistoryRecord>, // None until step 10
+    pub now: u64,                           // passed in so tests are deterministic
+}
+
+pub trait Scorer: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn score(&self, c: &Candidate) -> i32;
+}
+```
+
+- Each signal is one struct holding its own numbers, e.g.
+  `Modified { max_boost, half_life_days }`.
+- `default_scorers()` builds the list. Every weight is tuned there.
+- Match quality is a scorer too (`Quality { weight }`), so its weight sits
+  in the same list.
+- `name()` is for tuning: a debug view can show each scorer's
+  contribution, e.g. `readme.md: quality 420, modified 31`.
+- **Scale:** quality covers 0–1000 after weighting, and each boost is
+  capped at about 100, so match quality dominates unless a boost is large.
+- **Tier jumping isn't in the trait.** Scorers only change the score within
+  a tier. The history matcher decides a history hit's tier, including jumps.
+- `Entry` fields are private, so `Index` needs a `modified(id)` accessor.
+
+Open question:
+
+- **Dispatch.** Start with `Vec<Box<dyn Scorer>>`. Scorers only run on
+  entries that matched, but a one-letter query matches hundreds of
+  thousands of names, so benchmark that case. If it's slow, give each
+  scorer a `max_boost()` and skip scoring candidates that couldn't reach
+  the top `limit` even with every boost.
 
 ## TODO
 
