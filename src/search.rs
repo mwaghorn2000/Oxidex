@@ -105,6 +105,10 @@ const GAP_EXTEND: i32 = 1;
 // `scorers` (usually `score::default_scorers()`), with `now` in seconds since
 // 1970. If `cancel` fires, stops early, clears `out` so a partial list is
 // never shown, and returns `Cancelled`.
+//
+// Path mode: if `query` contains `/` or `\`, the part after the last one is
+// matched against names as usual, and each part before it must match a
+// folder above the hit (see `folders_match`).
 pub fn search(
     indexes: &[Index],
     query: &str,
@@ -119,6 +123,9 @@ pub fn search(
         return Ok(());
     }
     let query = Query::new(query);
+    if query.text.is_empty() {
+        return Ok(());
+    }
     let mut scratch = Scratch::default();
 
     // Keep only the best `limit` hits instead of collecting and sorting every
@@ -144,25 +151,31 @@ pub fn search(
             let Some(name) = index.name(id) else {
                 continue;
             };
-            if let Some((tier, quality)) = match_name(name, &query, &mut scratch) {
-                // RANKING SIGNALS are applied here, before the hit competes
-                // for a place in `out`. Add new ones to `default_scorers` in
-                // score.rs, not here.
-                let candidate = Candidate {
-                    index,
-                    id,
-                    tier,
-                    quality,
-                    now,
-                };
-                let hit = Hit {
-                    index: number as u32,
-                    id,
-                    tier,
-                    score: total(scorers, &candidate),
-                };
-                keep(indexes, limit, out, &mut worst, hit);
+            let Some((tier, quality)) = match_name(name, &query, &mut scratch) else {
+                continue;
+            };
+            // Checked after the name matches, so path mode costs nothing for
+            // the names that don't.
+            if !query.folders.is_empty() && !folders_match(index, id, &query.folders) {
+                continue;
             }
+            // RANKING SIGNALS are applied here, before the hit competes for a
+            // place in `out`. Add new ones to `default_scorers` in score.rs,
+            // not here.
+            let candidate = Candidate {
+                index,
+                id,
+                tier,
+                quality,
+                now,
+            };
+            let hit = Hit {
+                index: number as u32,
+                id,
+                tier,
+                score: total(scorers, &candidate),
+            };
+            keep(indexes, limit, out, &mut worst, hit);
         }
     }
     out.sort_by(|a, b| compare(indexes, a, b));
@@ -171,8 +184,12 @@ pub fn search(
 
 // The query in the forms matching needs, worked out once per search.
 struct Query {
-    // Lowercased, to match the lowercased names in the index.
+    // Lowercased, to match the lowercased names in the index. In path mode,
+    // only the part after the last slash.
     text: String,
+    // Path mode: the lowercased parts before the last slash, outermost first.
+    // Empty when the query has no slash.
+    folders: Vec<String>,
     chars: Vec<char>,
     // ASCII bytes never occur inside a multi-byte UTF-8 character, so an
     // ASCII query can be matched byte by byte without splitting characters.
@@ -185,9 +202,19 @@ struct Query {
 
 impl Query {
     fn new(query: &str) -> Query {
-        let text = query.to_lowercase();
+        let lowercase = query.to_lowercase();
+        let mut parts: Vec<&str> = lowercase.split(['/', '\\']).collect();
+        let text = parts.pop().unwrap_or_default().to_string();
+        // Empty parts ("/notes", "docs//notes") would match any folder, so
+        // they're dropped rather than checked.
+        let folders = parts
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect();
         let chars: Vec<char> = text.chars().collect();
         Query {
+            folders,
             ascii: text.is_ascii(),
             max_edits: max_edits(chars.len()),
             mask: char_mask(&text),
@@ -345,6 +372,43 @@ fn match_name(name: &str, query: &Query, scratch: &mut Scratch) -> Option<(Tier,
         subsequence_score(name_chars, &query.chars)
     }?;
     Some((Tier::Subsequence, score))
+}
+
+// Path mode: true if each folder part matches a folder above `id`, in order.
+// The last part matches the nearest such folder and each earlier part one
+// further up, so `a/b/x` needs `b` inside `a`. Taking the nearest match each
+// time never misses a chain that a later choice would have found. Parts
+// match as a subsequence, so `dcs` matches `docs`.
+fn folders_match(index: &Index, id: u32, folders: &[String]) -> bool {
+    // `None` means the parents form a cycle. The depth also bounds the walk.
+    let Some(depth) = index.depth(id) else {
+        return false;
+    };
+    let mut remaining = folders.len();
+    let mut curr = id;
+    for _ in 0..depth {
+        if remaining == 0 {
+            break;
+        }
+        let Some(parent) = index.parent(curr) else {
+            return false;
+        };
+        let Some(name) = index.name(parent) else {
+            return false;
+        };
+        if in_order(name, &folders[remaining - 1]) {
+            remaining -= 1;
+        }
+        curr = parent;
+    }
+    remaining == 0
+}
+
+// True if `part`'s characters appear in `name` in order. Compares `char`s,
+// so it works for any query; it's only run on a hit's few folders.
+fn in_order(name: &str, part: &str) -> bool {
+    let mut chars = name.chars();
+    part.chars().all(|p| chars.any(|n| n == p))
 }
 
 // The name without its extension. A leading dot starts the name
@@ -857,6 +921,115 @@ mod tests {
     fn earlier_tier_match_is_not_repeated() {
         let index = index_of(&["slack.exe", "slick"]);
         assert_eq!(names(&index, "slack", 10), ["slack.exe", "slick"]);
+    }
+
+    // root/
+    //   docs/readme.md, docs/old/notes.txt
+    //   src/readme.md, src/docs/
+    fn tree() -> Index {
+        let mut index = Index::new();
+        let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
+        let docs = index.push("docs", root, true, 0, 0).unwrap();
+        index.push("readme.md", docs, false, 0, 0).unwrap();
+        let old = index.push("old", docs, true, 0, 0).unwrap();
+        index.push("notes.txt", old, false, 0, 0).unwrap();
+        let src = index.push("src", root, true, 0, 0).unwrap();
+        index.push("readme.md", src, false, 0, 0).unwrap();
+        index.push("docs", src, true, 0, 0).unwrap();
+        index
+    }
+
+    // Full path of each hit, in result order.
+    fn paths(index: Index, query: &str) -> Vec<String> {
+        let indexes = [index];
+        let mut out = Vec::new();
+        search(
+            &indexes,
+            query,
+            10,
+            &default_scorers(),
+            0,
+            &Cancel::never(),
+            &mut out,
+        )
+        .unwrap();
+        out.iter()
+            .map(|h| {
+                indexes[0]
+                    .full_path(h.id)
+                    .unwrap()
+                    .display()
+                    .to_string()
+                    .replace('\\', "/")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn path_query_matches_file_under_folder() {
+        assert_eq!(paths(tree(), "docs/readme"), ["root/docs/readme.md"]);
+    }
+
+    #[test]
+    fn backslash_works_like_slash() {
+        assert_eq!(paths(tree(), "docs\\readme"), ["root/docs/readme.md"]);
+    }
+
+    #[test]
+    fn folder_part_is_subsequence() {
+        assert_eq!(paths(tree(), "dcs/readme"), ["root/docs/readme.md"]);
+    }
+
+    #[test]
+    fn folder_need_not_be_direct_parent() {
+        assert_eq!(paths(tree(), "docs/notes"), ["root/docs/old/notes.txt"]);
+    }
+
+    #[test]
+    fn folder_parts_match_in_order() {
+        assert_eq!(paths(tree(), "docs/old/notes"), ["root/docs/old/notes.txt"]);
+        assert!(paths(tree(), "old/docs/notes").is_empty());
+    }
+
+    // The match's own name doesn't count as one of its folders.
+    #[test]
+    fn file_name_is_not_its_own_folder() {
+        assert!(paths(tree(), "readme/readme").is_empty());
+    }
+
+    #[test]
+    fn folders_can_match_the_file_part() {
+        assert_eq!(paths(tree(), "src/docs"), ["root/src/docs"]);
+    }
+
+    // The tier comes from the file part alone, as if there were no folders.
+    #[test]
+    fn path_hit_is_ranked_by_file_part() {
+        let indexes = [tree()];
+        let mut out = Vec::new();
+        search(
+            &indexes,
+            "docs/readme",
+            10,
+            &default_scorers(),
+            0,
+            &Cancel::never(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out[0].tier, Tier::Exact);
+        assert_eq!(out[0].score, 900);
+    }
+
+    #[test]
+    fn empty_folder_parts_are_ignored() {
+        assert_eq!(paths(tree(), "/notes"), ["root/docs/old/notes.txt"]);
+        assert_eq!(paths(tree(), "docs//notes"), ["root/docs/old/notes.txt"]);
+    }
+
+    #[test]
+    fn trailing_slash_returns_nothing() {
+        assert!(paths(tree(), "docs/").is_empty());
     }
 
     const DAY: u64 = 86_400;
