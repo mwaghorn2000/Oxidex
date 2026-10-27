@@ -111,3 +111,24 @@ Most queries take 12–14 ms, about 22–26 ns per name, which is over the
 results and nothing can beat them. `cargo` sometimes stops early too,
 depending on where the walk put the exact matches. That early stop goes
 away once step 3 ranks matches within a tier.
+
+### Match quality, one index
+
+Step 3 adds per-tier quality scoring, fzf-style subsequence scoring and the
+full tiebreak order. It also removes the early stop.
+
+| Query | Matches | Naive | Search |
+|---|---|---|---|
+| `a` | 343,867 | 7.9 ms | 12.7 ms |
+| `e` | 413,694 | 7.5 ms | 12.6 ms |
+| `readme` | 4,959 | 8.5 ms | 17.5 ms |
+| `main.rs` | 40 | 8.2 ms | 16.3 ms |
+| `cargo` | 374 | 8.4 ms | 17.7 ms |
+| `zzqxj` | 0 | 8.1 ms | 14.7 ms |
+| `rdm` | 202 | 8.2 ms | 17.6 ms |
+| `café` | 0 | 8.0 ms | 27.0 ms |
+
+Queries with no early stop are 1–3 ms slower than step 2, so 15–18 ms. The
+`readme` and `cargo` speedups are gone, as expected now that a full set of
+exact matches no longer stops the scan. Non-ASCII queries are the slowest,
+because every name is decoded into `char`s before the subsequence check.

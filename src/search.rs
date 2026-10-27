@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::index::Index;
 
 // Ordered best first, so sorting by tier puts exact matches on top.
@@ -12,9 +14,20 @@ pub enum Tier {
 pub struct Hit {
     pub id: u32,
     pub tier: Tier,
+    // Match quality within the tier, 0 to 1000. Higher is better.
+    pub score: i32,
 }
 
-// Fills `out` with up to `limit` hits for `query`, best tier first. An exact
+// Subsequence scoring, after fzf: every matched character earns `MATCH`, plus
+// a bonus at the start of a word or for following the previous match. Gaps
+// between matches cost a fixed amount plus a little per skipped character.
+const MATCH: i32 = 16;
+const WORD_START: i32 = 8;
+const CONSECUTIVE: i32 = 8;
+const GAP_START: i32 = 3;
+const GAP_EXTEND: i32 = 1;
+
+// Fills `out` with up to `limit` hits for `query`, best first. An exact
 // match is the whole name or the name without its extension. Matching is
 // case-insensitive.
 pub fn search(index: &Index, query: &str, limit: usize, out: &mut Vec<Hit>) {
@@ -25,73 +38,156 @@ pub fn search(index: &Index, query: &str, limit: usize, out: &mut Vec<Hit>) {
     let query = query.to_lowercase();
     // ASCII bytes never occur inside a multi-byte UTF-8 character, so an
     // ASCII query can be matched byte by byte without splitting characters.
+    // Other queries are matched by `char`, decoding each name into a reused
+    // buffer.
     let ascii = query.is_ascii();
+    let query_chars: Vec<char> = query.chars().collect();
+    let mut name_chars = Vec::new();
 
-    // Hits at or below this tier can't replace anything once `out` is full.
-    let mut worst = Tier::Subsequence;
+    // Position of the worst hit in `out`, once `out` is full.
+    let mut worst = None;
     let mut id = 0;
     while let Some(name) = index.name(id) {
-        if out.len() == limit && worst == Tier::Exact {
-            break;
-        }
-        if let Some(tier) = match_tier(name, &query, ascii) {
+        if let Some((tier, score)) = match_name(name, &query, ascii, &query_chars, &mut name_chars)
+        {
+            let hit = Hit { id, tier, score };
             if out.len() < limit {
-                out.push(Hit { id, tier });
-            } else if tier < worst {
-                replace_worst(out, Hit { id, tier });
-            }
-            if out.len() == limit {
-                worst = out.iter().map(|h| h.tier).max().unwrap_or(Tier::Exact);
+                out.push(hit);
+                if out.len() == limit {
+                    worst = Some(find_worst(index, out));
+                }
+            } else if let Some(w) = worst
+                && compare(index, &hit, &out[w]) == Ordering::Less
+            {
+                out[w] = hit;
+                worst = Some(find_worst(index, out));
             }
         }
         id += 1;
     }
-    out.sort_by_key(|h| (h.tier, h.id));
+    out.sort_by(|a, b| compare(index, a, b));
 }
 
-fn match_tier(name: &str, query: &str, ascii: bool) -> Option<Tier> {
+fn match_name(
+    name: &str,
+    query: &str,
+    ascii: bool,
+    query_chars: &[char],
+    name_chars: &mut Vec<char>,
+) -> Option<(Tier, i32)> {
     // A leading dot starts the name (".bashrc"), not an extension.
     let stem = match name.rfind('.') {
         Some(dot) if dot > 0 => &name[..dot],
         _ => name,
     };
-    if name == query || stem == query {
-        return Some(Tier::Exact);
+    if name == query {
+        return Some((Tier::Exact, 1000));
+    }
+    if stem == query {
+        return Some((Tier::Exact, 900));
     }
     if name.starts_with(query) {
-        return Some(Tier::Prefix);
+        // The less of the name left over, the closer to an exact match.
+        let score = (1000 * query.len() / name.len()) as i32;
+        return Some((Tier::Prefix, score));
     }
-    let found = if ascii {
-        is_subsequence(name.as_bytes().iter(), query.as_bytes().iter())
+    let score = if ascii {
+        subsequence_score(name.as_bytes(), query.as_bytes())
     } else {
-        is_subsequence(name.chars(), query.chars())
-    };
-    found.then_some(Tier::Subsequence)
+        name_chars.clear();
+        name_chars.extend(name.chars());
+        subsequence_score(name_chars, query_chars)
+    }?;
+    Some((Tier::Subsequence, score))
 }
 
-// True if every item of `query` appears in `name`, in order.
-fn is_subsequence<T: PartialEq>(
-    mut name: impl Iterator<Item = T>,
-    query: impl Iterator<Item = T>,
-) -> bool {
-    for q in query {
-        if !name.any(|n| n == q) {
-            return false;
+// Scores the tightest match of `query` in `name`, or `None` if it isn't a
+// subsequence. `query` must not be empty.
+fn subsequence_score<T: Copy + PartialEq + Into<char>>(name: &[T], query: &[T]) -> Option<i32> {
+    // Forward pass: where the first complete match ends.
+    let mut q = 0;
+    let mut end = None;
+    for (i, &c) in name.iter().enumerate() {
+        if c == query[q] {
+            q += 1;
+            if q == query.len() {
+                end = Some(i);
+                break;
+            }
         }
     }
-    true
+    let end = end?;
+
+    // Backward pass from `end`: the latest start, so the match is as tight
+    // as it can be.
+    let mut q = query.len();
+    let mut start = end;
+    for i in (0..=end).rev() {
+        if name[i] == query[q - 1] {
+            q -= 1;
+            if q == 0 {
+                start = i;
+                break;
+            }
+        }
+    }
+
+    let mut score = 0;
+    let mut q = 0;
+    let mut prev: Option<usize> = None;
+    for i in start..=end {
+        if q == query.len() || name[i] != query[q] {
+            continue;
+        }
+        score += MATCH;
+        if i == 0 || is_separator(name[i - 1].into()) {
+            score += WORD_START;
+        }
+        match prev {
+            Some(p) if p + 1 == i => score += CONSECUTIVE,
+            Some(p) => score -= GAP_START + GAP_EXTEND * (i - p - 2) as i32,
+            None => {}
+        }
+        prev = Some(i);
+        q += 1;
+    }
+
+    // Scale so a match that is all word starts and runs scores 1000.
+    let best = (MATCH + WORD_START + CONSECUTIVE) * query.len() as i32;
+    Some((score.max(0) * 1000 / best).min(1000))
 }
 
-// Replaces the worst hit: the highest tier, and the latest ID among those so
-// earlier entries win ties.
-fn replace_worst(out: &mut [Hit], hit: Hit) {
+fn is_separator(c: char) -> bool {
+    matches!(c, '.' | '_' | '-' | ' ')
+}
+
+// Best first: tier, then score, then shorter name, then shallower path, then
+// earlier entry. Name length and depth are only looked up on a tie.
+fn compare(index: &Index, a: &Hit, b: &Hit) -> Ordering {
+    a.tier
+        .cmp(&b.tier)
+        .then(b.score.cmp(&a.score))
+        .then_with(|| name_len(index, a.id).cmp(&name_len(index, b.id)))
+        .then_with(|| depth(index, a.id).cmp(&depth(index, b.id)))
+        .then(a.id.cmp(&b.id))
+}
+
+fn name_len(index: &Index, id: u32) -> usize {
+    index.name(id).map_or(usize::MAX, str::len)
+}
+
+fn depth(index: &Index, id: u32) -> u32 {
+    index.depth(id).unwrap_or(u32::MAX)
+}
+
+fn find_worst(index: &Index, out: &[Hit]) -> usize {
     let mut worst = 0;
     for i in 1..out.len() {
-        if (out[i].tier, out[i].id) > (out[worst].tier, out[worst].id) {
+        if compare(index, &out[i], &out[worst]) == Ordering::Greater {
             worst = i;
         }
     }
-    out[worst] = hit;
+    worst
 }
 
 #[cfg(test)]
@@ -208,5 +304,86 @@ mod tests {
     #[test]
     fn non_ascii_match_does_not_split_characters() {
         assert_eq!(tier_of(&["ã©"], "é"), None);
+    }
+
+    fn names(index: &Index, query: &str, limit: usize) -> Vec<String> {
+        results(index, query, limit)
+            .into_iter()
+            .map(|h| h.0)
+            .collect()
+    }
+
+    // In the quality tests below, the better match is pushed second and has
+    // the longer name, so the tiebreaks alone would put it last.
+
+    #[test]
+    fn prefix_closer_to_full_name_ranks_higher() {
+        let index = index_of(&["readme_old_backup", "readme"]);
+        assert_eq!(names(&index, "read", 10), ["readme", "readme_old_backup"]);
+    }
+
+    #[test]
+    fn subsequence_word_starts_rank_higher() {
+        let index = index_of(&["xfoxbar", "foo_bar.txt"]);
+        assert_eq!(names(&index, "fb", 10), ["foo_bar.txt", "xfoxbar"]);
+    }
+
+    #[test]
+    fn subsequence_consecutive_letters_rank_higher() {
+        let index = index_of(&["xaxbxc", "xxxabcxxxx"]);
+        assert_eq!(names(&index, "abc", 10), ["xxxabcxxxx", "xaxbxc"]);
+    }
+
+    #[test]
+    fn subsequence_smaller_gaps_rank_higher() {
+        let index = index_of(&["xaxxxxxxbx", "xaxbxxxxxxxx"]);
+        assert_eq!(names(&index, "ab", 10), ["xaxbxxxxxxxx", "xaxxxxxxbx"]);
+    }
+
+    // Greedy left-to-right matching would take the first 'a' and leave a big
+    // gap. The tight "ab" at the end is the better match.
+    #[test]
+    fn subsequence_finds_tightest_match() {
+        let index = index_of(&["xaxxbx", "xaxxxxxxxx_ab"]);
+        assert_eq!(names(&index, "ab", 10), ["xaxxxxxxxx_ab", "xaxxbx"]);
+    }
+
+    #[test]
+    fn ties_go_to_shorter_name() {
+        let index = index_of(&["readme.txt", "readme.md"]);
+        assert_eq!(names(&index, "readme", 10), ["readme.md", "readme.txt"]);
+    }
+
+    #[test]
+    fn ties_go_to_shallower_path() {
+        let mut index = Index::new();
+        let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
+        let docs = index.push("docs", root, true, 0, 0).unwrap();
+        let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
+        let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
+        let mut out = Vec::new();
+        search(&index, "a.txt", 10, &mut out);
+        let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
+        assert_eq!(ids, [shallow, deep]);
+    }
+
+    #[test]
+    fn ties_go_to_earlier_entry() {
+        let mut index = Index::new();
+        let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
+        let first = index.push("a.txt", root, false, 0, 0).unwrap();
+        let second = index.push("a.txt", root, false, 0, 0).unwrap();
+        let mut out = Vec::new();
+        search(&index, "a.txt", 10, &mut out);
+        let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
+        assert_eq!(ids, [first, second]);
+    }
+
+    // A full set of exact matches must not stop the scan: a later exact match
+    // can still score higher.
+    #[test]
+    fn limit_keeps_best_quality() {
+        let index = index_of(&["readme.txt", "readme"]);
+        assert_eq!(names(&index, "readme", 1), ["readme"]);
     }
 }
