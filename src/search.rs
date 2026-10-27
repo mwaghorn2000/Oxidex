@@ -14,6 +14,7 @@
 // 3. Tiebreaks (`compare`): only for hits with equal tier and score, so the
 //    order never shuffles between searches. Not a place for ranking signals.
 use std::cmp::Ordering;
+use std::sync::atomic::{self, AtomicU64};
 
 use crate::index::Index;
 
@@ -42,6 +43,47 @@ pub struct Hit {
     pub score: i32,
 }
 
+// Lets a newer query stop an older search. The UI bumps `latest` on every
+// keystroke and starts a search for the new generation; any search still
+// running for an older generation sees the change and stops.
+pub struct Cancel<'a> {
+    latest: &'a AtomicU64,
+    generation: u64,
+}
+
+// Returned by `search` when it stopped because a newer query started.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Cancelled;
+
+// Never bumped, so `Cancel::never` is never cancelled.
+static NEVER: AtomicU64 = AtomicU64::new(0);
+
+impl<'a> Cancel<'a> {
+    pub fn new(latest: &'a AtomicU64, generation: u64) -> Cancel<'a> {
+        Cancel { latest, generation }
+    }
+
+    // For searches nothing will cancel: tests, benchmarks, one-off searches.
+    pub fn never() -> Cancel<'static> {
+        Cancel {
+            latest: &NEVER,
+            generation: 0,
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        // Relaxed is enough: the counter is only a stop flag and no other data
+        // is passed through it. Seeing the bump a little late just means a
+        // few more entries get scanned.
+        self.latest.load(atomic::Ordering::Relaxed) != self.generation
+    }
+}
+
+// How many entries to scan between cancellation checks. Rare enough that the
+// check costs nothing measurable; often enough that a stale search stops
+// within microseconds.
+const CANCEL_CHECK_EVERY: u32 = 4096;
+
 // Subsequence scoring, after fzf: every matched character earns `MATCH`, plus
 // a bonus at the start of a word or for following the previous match. Gaps
 // between matches cost a fixed amount plus a little per skipped character.
@@ -53,11 +95,18 @@ const GAP_EXTEND: i32 = 1;
 
 // Fills `out` with up to `limit` hits for `query` from all of `indexes`,
 // best first. An exact match is the whole name or the name without its
-// extension. Matching is case-insensitive.
-pub fn search(indexes: &[Index], query: &str, limit: usize, out: &mut Vec<Hit>) {
+// extension. Matching is case-insensitive. If `cancel` fires, stops early,
+// clears `out` so a partial list is never shown, and returns `Cancelled`.
+pub fn search(
+    indexes: &[Index],
+    query: &str,
+    limit: usize,
+    cancel: &Cancel,
+    out: &mut Vec<Hit>,
+) -> Result<(), Cancelled> {
     out.clear();
     if query.is_empty() || limit == 0 {
-        return;
+        return Ok(());
     }
     let query = query.to_lowercase();
     // ASCII bytes never occur inside a multi-byte UTF-8 character, so an
@@ -76,6 +125,11 @@ pub fn search(indexes: &[Index], query: &str, limit: usize, out: &mut Vec<Hit>) 
     for (number, index) in indexes.iter().enumerate() {
         let mut id = 0;
         while let Some(name) = index.name(id) {
+            // Checked at entry 0 too, so an already-stale search does no work.
+            if id % CANCEL_CHECK_EVERY == 0 && cancel.is_cancelled() {
+                out.clear();
+                return Err(Cancelled);
+            }
             if let Some((tier, score)) =
                 match_name(name, &query, ascii, &query_chars, &mut name_chars)
             {
@@ -94,6 +148,7 @@ pub fn search(indexes: &[Index], query: &str, limit: usize, out: &mut Vec<Hit>) 
         }
     }
     out.sort_by(|a, b| compare(indexes, a, b));
+    Ok(())
 }
 
 // Adds `hit` to `out` if there's room or it beats the worst kept hit.
@@ -257,6 +312,7 @@ fn find_worst(indexes: &[Index], out: &[Hit]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
 
     // A root folder with each name as a direct child file.
     fn index_of(names: &[&str]) -> Index {
@@ -271,7 +327,14 @@ mod tests {
     // Display name and tier of each hit, in result order.
     fn results(index: &Index, query: &str, limit: usize) -> Vec<(String, Tier)> {
         let mut out = Vec::new();
-        search(std::slice::from_ref(index), query, limit, &mut out);
+        search(
+            std::slice::from_ref(index),
+            query,
+            limit,
+            &Cancel::never(),
+            &mut out,
+        )
+        .unwrap();
         out.iter()
             .map(|hit| (index.display_name(hit.id).unwrap().to_string(), hit.tier))
             .collect()
@@ -426,7 +489,7 @@ mod tests {
         let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
         let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
         let mut out = Vec::new();
-        search(&[index], "a.txt", 10, &mut out);
+        search(&[index], "a.txt", 10, &Cancel::never(), &mut out).unwrap();
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [shallow, deep]);
     }
@@ -438,7 +501,7 @@ mod tests {
         let first = index.push("a.txt", root, false, 0, 0).unwrap();
         let second = index.push("a.txt", root, false, 0, 0).unwrap();
         let mut out = Vec::new();
-        search(&[index], "a.txt", 10, &mut out);
+        search(&[index], "a.txt", 10, &Cancel::never(), &mut out).unwrap();
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [first, second]);
     }
@@ -454,7 +517,7 @@ mod tests {
     // Index number and display name of each hit, in result order.
     fn hits_across(indexes: &[Index], query: &str, limit: usize) -> Vec<(u32, String)> {
         let mut out = Vec::new();
-        search(indexes, query, limit, &mut out);
+        search(indexes, query, limit, &Cancel::never(), &mut out).unwrap();
         out.iter()
             .map(|hit| {
                 let name = indexes[hit.index as usize].display_name(hit.id).unwrap();
@@ -506,5 +569,56 @@ mod tests {
             hits_across(&indexes, "a.txt", 10),
             [(0, "a.txt".to_string()), (1, "a.txt".to_string())]
         );
+    }
+
+    #[test]
+    fn cancel_follows_latest_generation() {
+        let latest = AtomicU64::new(3);
+        let cancel = Cancel::new(&latest, 3);
+        assert!(!cancel.is_cancelled());
+        latest.store(4, std::sync::atomic::Ordering::Relaxed);
+        assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn never_is_never_cancelled() {
+        assert!(!Cancel::never().is_cancelled());
+    }
+
+    #[test]
+    fn search_that_is_not_cancelled_returns_ok() {
+        let latest = AtomicU64::new(1);
+        let mut out = Vec::new();
+        let result = search(
+            &[index_of(&["a.txt"])],
+            "a",
+            10,
+            &Cancel::new(&latest, 1),
+            &mut out,
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(out.len(), 1);
+    }
+
+    // A newer query has already started, so this search must stop before
+    // returning any hits, even ones that match.
+    #[test]
+    fn stale_search_is_cancelled_and_leaves_out_empty() {
+        let latest = AtomicU64::new(2);
+        let mut out = vec![Hit {
+            index: 9,
+            id: 9,
+            tier: Tier::Exact,
+            score: 0,
+        }];
+        let result = search(
+            &[index_of(&["a.txt"])],
+            "a",
+            10,
+            &Cancel::new(&latest, 1),
+            &mut out,
+        );
+        assert_eq!(result, Err(Cancelled));
+        assert!(out.is_empty());
     }
 }

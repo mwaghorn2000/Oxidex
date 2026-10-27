@@ -44,7 +44,14 @@ fn main() {
         times.clear();
         for _ in 0..RUNS {
             let start = Instant::now();
-            oxidex::search::search(std::slice::from_ref(&index), &query, LIMIT, &mut hits);
+            let cancel = oxidex::search::Cancel::never();
+            let _ = oxidex::search::search(
+                std::slice::from_ref(&index),
+                &query,
+                LIMIT,
+                &cancel,
+                &mut hits,
+            );
             times.push(start.elapsed());
         }
         println!(
