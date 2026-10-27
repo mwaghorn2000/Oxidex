@@ -45,6 +45,30 @@ jumping, below.
   against the start of the stem (prefix edit distance), so `slar` matches
   `slack`.
 
+## Match quality
+
+How results are ranked within each tier, before boosts:
+
+- **Exact:** a whole-name match beats a stem match.
+- **Prefix:** the closer the name's length is to the query's, the better
+  (`read` → `readme` beats `readme_old_backup`).
+- **Subsequence:** fzf-style. Bonuses for matching at the start of the name,
+  right after `.` `_` `-` or a space, and for runs of consecutive matched
+  characters. Gaps cost points. No camelCase bonus, because names are
+  lowercased in the index.
+- **Levenshtein:** fewer edits is better.
+
+Folders and files are ranked the same way, with no penalty or bonus for
+either.
+
+### Unicode
+
+- ASCII queries are matched byte by byte, which is fast and correct.
+- Other queries are matched character by character, because a byte-wise
+  subsequence could match the first byte of one character and the second
+  byte of another.
+- No accent folding: `cafe` doesn't match `café`.
+
 ## Scoring signals
 
 ### Frecency
@@ -149,3 +173,26 @@ Open questions:
 
 - **Multi-word search.** fzf-style, where `foo bar` matches names
   containing both words in any order. Until then, spaces are literal.
+- **Accent folding**, so `cafe` matches `café`.
+- **camelCase bonus** in subsequence matching, using the display names.
+
+## Build order
+
+One commit each, about 200 lines or fewer, each building and passing tests:
+
+1. A `search_time` example and benchmark baseline, using a naive
+   `contains` scan as the reference.
+2. Exact, prefix and subsequence tiers for one `Index`, keeping the top
+   `limit` results.
+3. Match quality scoring.
+4. Search over `&[Index]`, with results as (index, id).
+5. Cancellation.
+6. The Levenshtein pass.
+7. The `Scorer` trait and the modified-time scorer.
+8. Path mode.
+9. The previous-query cache.
+10. History and frecency, including tier jumping.
+
+Streaming and the search thread come once the app crate exists. History
+storage and skipping folders like `.git` and `node_modules` during the walk
+are decided when we reach them.
