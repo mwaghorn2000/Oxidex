@@ -74,5 +74,6 @@ cargo build
 cargo test
 cargo fmt
 cargo clippy -- -D warnings
+cargo run --release -- <folder>...   # command-line search
 cargo run -p oxidex-app
 ``` 

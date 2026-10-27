@@ -135,8 +135,8 @@ A file can only jump tiers when:
 Results are sent to the popup in phases, so cached results appear on the
 first frame and the full scan fills in after:
 
-1. **Cached results**: history matches, plus the previous query's results
-   filtered against the new query.
+1. **Cached results**: history matches. (The previous query's results,
+   filtered against the new query, are part of the deferred cache below.)
 2. **The main index**: exact, prefix, Levenshtein and subsequence
    matches, in one pass.
 
@@ -160,6 +160,16 @@ How it runs:
   swaps in a new `Arc`, and in-flight searches keep using the old one.
 
 ## Previous-query cache
+
+**Deferred.** The missing-character filter now does most of this job. The
+scan over every entry is just the mask check, about 1 ms on `/home/mitch`
+(`zzqxj` takes 1.0 ms in total). Most of a query's time goes on matching
+the names that pass the mask, which the cache wouldn't avoid. Revisit only
+if a benchmark shows the full mask scan matters. If it's built, cache the
+names that passed the mask check rather than the matches: appending
+characters can only make more of them go missing, so that set only shrinks
+while `max_edits` stays the same. That covers typo matches too. The plan
+below predates the filter.
 
 When the new query is the previous query with characters appended (`rea`
 → `read`), every subsequence match for the new query was also a match for
@@ -253,8 +263,9 @@ One commit each, about 200 lines or fewer, each building and passing tests:
 6. The Levenshtein pass.
 7. The `Scorer` trait and the modified-time scorer.
 8. Path mode.
-9. The previous-query cache.
-10. History and frecency, including tier jumping.
+9. ~~The previous-query cache.~~ Deferred, see "Previous-query cache".
+10. A command-line search (`src/main.rs`), to try search on real folders.
+11. History and frecency, including tier jumping.
 
 Streaming and the search thread come once the app crate exists. History
 storage and skipping folders like `.git` and `node_modules` during the walk
