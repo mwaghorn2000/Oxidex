@@ -224,3 +224,19 @@ Queries of 1–2 characters now only match exactly or as a prefix.
 Every query measured so far is now at or near the 10 ms target (`readme`
 9.9 ms, `raedme` 10.9 ms at the last measurement), except non-ASCII ones
 (`café`, 29 ms).
+
+### Scorers
+
+Step 7 ranks hits within a tier by `default_scorers()`, the quality and
+modified-time scorers. Both run on every match, through
+`Vec<Box<dyn Scorer>>`.
+
+| Query | Before | After |
+|---|---|---|
+| `a` | 6.1 ms | 6.4 ms |
+| `re` | 4.5 ms | 4.8 ms |
+| `rdm` | 5.4 ms | 5.9 ms |
+| `readme` | 9.9 ms | 10.1 ms |
+| `raedme` | 10.9 ms | 10.5 ms |
+
+0.2–0.5 ms per query, so dynamic dispatch stays.

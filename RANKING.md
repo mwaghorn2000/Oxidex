@@ -195,7 +195,7 @@ pub struct Candidate<'a> {
     pub id: u32,
     pub tier: Tier,
     pub quality: i32,                       // from the matcher
-    pub history: Option<&'a HistoryRecord>, // None until step 10
+    pub history: Option<&'a HistoryRecord>, // added in step 10
     pub now: u64,                           // passed in so tests are deterministic
 }
 
@@ -218,13 +218,10 @@ pub trait Scorer: Send + Sync {
   a tier. The history matcher decides a history hit's tier, including jumps.
 - `Entry` fields are private, so `Index` needs a `modified(id)` accessor.
 
-Open question:
-
-- **Dispatch.** Start with `Vec<Box<dyn Scorer>>`. Scorers only run on
-  entries that matched, but a one-letter query matches hundreds of
-  thousands of names, so benchmark that case. If it's slow, give each
-  scorer a `max_boost()` and skip scoring candidates that couldn't reach
-  the top `limit` even with every boost.
+**Dispatch:** `Vec<Box<dyn Scorer>>`. Benchmarked with the quality and
+modified-time scorers running on every match: 0.2–0.5 ms per query on
+`/home/mitch` (see BENCHMARKS.md), so there's no need for anything more
+complicated.
 
 ## TODO
 
