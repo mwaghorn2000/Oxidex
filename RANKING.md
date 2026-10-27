@@ -35,6 +35,10 @@ jumping, below.
 - In path mode (`docs/rea`), each folder part must subsequence-match a
   folder name on the way up the parent chain. Results are ranked by the
   file-name part only.
+- Queries of 1–2 characters only match exactly or as a prefix. Almost
+  every name contains one or two given letters somewhere, so a subsequence
+  match says nothing useful, and scoring them all was slow. Subsequence
+  matching starts at 3 characters, typos at 4.
 - The Levenshtein tier allows edits by query length: none under 4
   characters, 1 for 4–7 characters, 2 for 8 or more. A 3-letter query is
   usually an abbreviation (`rdm` for `readme`), and since typos rank above
@@ -161,6 +165,9 @@ scanning the whole index, so typing gets faster as the query grows.
   cancelled) and the index's `Arc` hasn't been swapped since.
 - Any other edit (backspace, an edit mid-query, a switch into or out of
   path mode) does a full scan.
+- So does going from 2 to 3 characters: 1–2 character queries only match
+  exactly or as a prefix, so the previous results don't include the
+  subsequence matches that start at 3.
 - **Unsolved:** Levenshtein matches don't narrow this way. A name can be a
   typo match for `raedme` without having matched `raedm` at all. Since
   typos now run in the same pass, step 9 has to work out how to find typo

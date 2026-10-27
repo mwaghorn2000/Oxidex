@@ -311,6 +311,12 @@ fn match_name(name: &str, query: &Query, scratch: &mut Scratch) -> Option<(Tier,
         let score = (1000 * q.len() / name.len()) as i32;
         return Some((Tier::Prefix, score));
     }
+    // 1–2 character queries stop here. Almost every name contains one or two
+    // given letters somewhere, so a subsequence match says nothing useful and
+    // scoring them all is slow. Typos already need 4+ characters.
+    if query.chars.len() < 3 {
+        return None;
+    }
     if query.max_edits > 0
         && let Some(edits) = typo_edits(name, stem, query, scratch)
     {
@@ -564,7 +570,24 @@ mod tests {
     // would match 'é' across two different characters.
     #[test]
     fn non_ascii_match_does_not_split_characters() {
-        assert_eq!(tier_of(&["ã©"], "é"), None);
+        assert_eq!(tier_of(&["ã©xy"], "éxy"), None);
+    }
+
+    #[test]
+    fn one_letter_query_matches_exact_and_prefix_only() {
+        let index = index_of(&["banana", "apple", "a.txt"]);
+        assert_eq!(names(&index, "a", 10), ["a.txt", "apple"]);
+    }
+
+    #[test]
+    fn two_letter_query_matches_exact_and_prefix_only() {
+        let index = index_of(&["xaxb", "abc", "ab"]);
+        assert_eq!(names(&index, "ab", 10), ["ab", "abc"]);
+    }
+
+    #[test]
+    fn three_letter_query_matches_subsequence() {
+        assert_eq!(tier_of(&["xaxbxc"], "abc"), Some(Tier::Subsequence));
     }
 
     fn names(index: &Index, query: &str, limit: usize) -> Vec<String> {
@@ -586,7 +609,7 @@ mod tests {
     #[test]
     fn subsequence_word_starts_rank_higher() {
         let index = index_of(&["xfoxbar", "foo_bar.txt"]);
-        assert_eq!(names(&index, "fb", 10), ["foo_bar.txt", "xfoxbar"]);
+        assert_eq!(names(&index, "fba", 10), ["foo_bar.txt", "xfoxbar"]);
     }
 
     #[test]
@@ -598,15 +621,15 @@ mod tests {
     #[test]
     fn subsequence_smaller_gaps_rank_higher() {
         let index = index_of(&["xaxxxxxxbx", "xaxbxxxxxxxx"]);
-        assert_eq!(names(&index, "ab", 10), ["xaxbxxxxxxxx", "xaxxxxxxbx"]);
+        assert_eq!(names(&index, "abx", 10), ["xaxbxxxxxxxx", "xaxxxxxxbx"]);
     }
 
     // Greedy left-to-right matching would take the first 'a' and leave a big
-    // gap. The tight "ab" at the end is the better match.
+    // gap, scoring below "xabxc". The tight "abc" at the end scores above it.
     #[test]
     fn subsequence_finds_tightest_match() {
-        let index = index_of(&["xaxxbx", "xaxxxxxxxx_ab"]);
-        assert_eq!(names(&index, "ab", 10), ["xaxxxxxxxx_ab", "xaxxbx"]);
+        let index = index_of(&["xabxc", "xaxxxxxxxx_abc"]);
+        assert_eq!(names(&index, "abc", 10), ["xaxxxxxxxx_abc", "xabxc"]);
     }
 
     #[test]

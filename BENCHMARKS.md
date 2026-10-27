@@ -208,3 +208,19 @@ What's left:
   time goes on scoring and on keeping the top 50.
 - **Non-ASCII queries** (`café`): the mask doesn't track `é`, so more names
   pass, and each of those is decoded into `char`s.
+
+### Prefix only for 1–2 character queries
+
+Queries of 1–2 characters now only match exactly or as a prefix.
+
+| Query | Before | After |
+|---|---|---|
+| `a` | 11.4 ms | 6.1 ms |
+| `e` | 12.5 ms | 6.4 ms |
+| `re` | — | 4.5 ms |
+| `rdm` (3 characters, unchanged) | 5.6 ms | 5.4 ms |
+| `readme` (unchanged) | 10.4 ms | 9.9 ms |
+
+Every query measured so far is now at or near the 10 ms target (`readme`
+9.9 ms, `raedme` 10.9 ms at the last measurement), except non-ASCII ones
+(`café`, 29 ms).
