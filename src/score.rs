@@ -8,7 +8,7 @@
 // Scale: match quality is 0 to 1000 and each boost is capped at about 100,
 // so match quality decides unless a boost is large.
 use crate::index::Index;
-use crate::search::Tier;
+use crate::matching::Tier;
 
 // Everything a scorer may look at for one matched entry. New fields can be
 // added without changing existing scorers.

@@ -1,7 +1,9 @@
 # Ranking
 
-How search results are ordered. This is the plan for `search.rs`; none of
-it is built yet. The numbers are starting points to tune with real use.
+How search results are ordered: what's built (in `search.rs`,
+`matching.rs` and `score.rs`) and what's still planned. The build order at
+the end marks which is which. The numbers are starting points to tune with
+real use.
 
 ## Input
 
@@ -264,18 +266,19 @@ complicated.
 
 One commit each, about 200 lines or fewer, each building and passing tests:
 
-1. A `search_time` example and benchmark baseline, using a naive
+1. **Done.** A `search_time` example and benchmark baseline, using a naive
    `contains` scan as the reference.
-2. Exact, prefix and subsequence tiers for one `Index`, keeping the top
-   `limit` results.
-3. Match quality scoring.
-4. Search over `&[Index]`, with results as (index, id).
-5. Cancellation.
-6. The Levenshtein pass.
-7. The `Scorer` trait and the modified-time scorer.
-8. Path mode.
+2. **Done.** Exact, prefix and subsequence tiers for one `Index`, keeping
+   the top `limit` results.
+3. **Done.** Match quality scoring.
+4. **Done.** Search over `&[Index]`, with results as (index, id).
+5. **Done.** Cancellation.
+6. **Done.** The Levenshtein pass.
+7. **Done.** The `Scorer` trait and the modified-time scorer.
+8. **Done.** Path mode.
 9. ~~The previous-query cache.~~ Deferred, see "Previous-query cache".
-10. A command-line search (`src/main.rs`), to try search on real folders.
+10. **Done.** A command-line search (`src/main.rs`), to try search on real
+    folders.
 11. History and frecency, including tier jumping.
 
 Streaming and the search thread come once the app crate exists. History
