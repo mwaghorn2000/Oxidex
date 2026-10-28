@@ -12,7 +12,8 @@ oxidex/
 │   └── src/
 │       ├── walk.rs      # folder crawling
 │       ├── index.rs     # Index, Entry, packed name buffer
-│       ├── search.rs    # tiered matching and scoring
+│       ├── search.rs    # scanning indexes, keeping the top hits
+│       ├── matching.rs  # tiers and match quality for one name
 │       ├── extract/     # Extractor trait + implementations
 │       └── store.rs     # save/load index to disk
 └── oxidex-app/    # binary: egui popup, hotkey, tray
