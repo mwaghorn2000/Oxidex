@@ -224,19 +224,27 @@ mod tests {
         index
     }
 
-    // Display name and tier of each hit, in result order.
-    fn results(index: &Index, query: &str, limit: usize) -> Vec<(String, Tier)> {
+    // Hits for `query` with the default scorers, as the frontend would get
+    // them. The one place tests call `search`, apart from tests of its other
+    // parameters (scorers, cancellation).
+    fn run(indexes: &[Index], query: &str, limit: usize, now: u64) -> Vec<Hit> {
         let mut out = Vec::new();
         search(
-            std::slice::from_ref(index),
+            indexes,
             query,
             limit,
             &default_scorers(),
-            0,
+            now,
             &Cancel::never(),
             &mut out,
         )
         .unwrap();
+        out
+    }
+
+    // Display name and tier of each hit, in result order.
+    fn results(index: &Index, query: &str, limit: usize) -> Vec<(String, Tier)> {
+        let out = run(std::slice::from_ref(index), query, limit, 0);
         out.iter()
             .map(|hit| (index.display_name(hit.id).unwrap().to_string(), hit.tier))
             .collect()
@@ -407,17 +415,7 @@ mod tests {
         let docs = index.push("docs", root, true, 0, 0).unwrap();
         let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
         let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
-        let mut out = Vec::new();
-        search(
-            &[index],
-            "a.txt",
-            10,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&[index], "a.txt", 10, 0);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [shallow, deep]);
     }
@@ -428,17 +426,7 @@ mod tests {
         let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
         let first = index.push("a.txt", root, false, 0, 0).unwrap();
         let second = index.push("a.txt", root, false, 0, 0).unwrap();
-        let mut out = Vec::new();
-        search(
-            &[index],
-            "a.txt",
-            10,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&[index], "a.txt", 10, 0);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [first, second]);
     }
@@ -453,17 +441,7 @@ mod tests {
 
     // Index number and display name of each hit, in result order.
     fn hits_across(indexes: &[Index], query: &str, limit: usize) -> Vec<(u32, String)> {
-        let mut out = Vec::new();
-        search(
-            indexes,
-            query,
-            limit,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(indexes, query, limit, 0);
         out.iter()
             .map(|hit| {
                 let name = indexes[hit.index as usize].display_name(hit.id).unwrap();
@@ -625,17 +603,7 @@ mod tests {
     // Full path of each hit, in result order.
     fn paths(index: Index, query: &str) -> Vec<String> {
         let indexes = [index];
-        let mut out = Vec::new();
-        search(
-            &indexes,
-            query,
-            10,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&indexes, query, 10, 0);
         out.iter()
             .map(|h| {
                 indexes[0]
@@ -689,17 +657,7 @@ mod tests {
     #[test]
     fn path_hit_is_ranked_by_file_part() {
         let indexes = [tree()];
-        let mut out = Vec::new();
-        search(
-            &indexes,
-            "docs/readme",
-            10,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&indexes, "docs/readme", 10, 0);
         assert_eq!(out[0].tier, Tier::Exact);
         assert_eq!(out[0].score, 900);
     }
@@ -729,17 +687,7 @@ mod tests {
             .push("a.txt", root, false, 0, NOW - 365 * DAY)
             .unwrap();
         let new = index.push("a.txt", root, false, 0, NOW).unwrap();
-        let mut out = Vec::new();
-        search(
-            &[index],
-            "a.txt",
-            10,
-            &default_scorers(),
-            NOW,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&[index], "a.txt", 10, NOW);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [new, old]);
     }
@@ -756,17 +704,7 @@ mod tests {
         index
             .push("readme_old_backup", root, false, 0, NOW)
             .unwrap();
-        let mut out = Vec::new();
-        search(
-            &[index],
-            "read",
-            10,
-            &default_scorers(),
-            NOW,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&[index], "read", 10, NOW);
         assert_eq!(out[0].id, 1);
     }
 
