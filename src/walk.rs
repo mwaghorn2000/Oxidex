@@ -8,6 +8,24 @@ use std::time::UNIX_EPOCH;
 
 use crate::index::Index;
 
+// Folders whose contents aren't indexed. They hold dependencies, build output
+// or version-control data: huge numbers of files nobody searches for, which
+// would bury the user's own. The folder itself is still indexed. Generic
+// names like `build` and `dist` are left out because people keep real files
+// in them.
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".venv",
+    ".tox",
+    ".gradle",
+    ".next",
+];
+
 pub struct Walk {
     pub index: Index,
     // Folders that couldn't be read, names that aren't valid UTF-8, and
@@ -203,7 +221,9 @@ fn push_batch(walk: &mut Walk, batch: Batch, queue: &Mutex<Queue>, ready: &Condv
 }
 
 // Pushes a batch into the index and returns its subfolders, which still need
-// to be read.
+// to be read. Folders in `SKIP_DIRS` are pushed but not returned, so they're
+// never read. The root is never checked, so walking a `target` folder
+// directly still indexes it.
 fn push_entries(walk: &mut Walk, batch: Batch) -> Vec<(PathBuf, u32)> {
     walk.skipped += batch.skipped;
     let mut dirs = Vec::new();
@@ -216,7 +236,9 @@ fn push_entries(walk: &mut Walk, batch: Batch) -> Vec<(PathBuf, u32)> {
             walk.skipped += 1;
             continue;
         };
-        if let Some(path) = f.path {
+        if let Some(path) = f.path
+            && !SKIP_DIRS.contains(&f.name.as_str())
+        {
             dirs.push((path, id));
         }
     }
@@ -316,6 +338,33 @@ mod tests {
             dir.join("a/b/c.txt"),
         ];
         assert_eq!(all_paths(&walk.index), expected);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn skip_dirs_are_listed_but_not_entered() {
+        let dir = temp_dir("skip_dirs");
+        fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        fs::write(dir.join("node_modules/pkg/index.js"), "").unwrap();
+        fs::create_dir_all(dir.join("target/debug")).unwrap();
+        fs::write(dir.join("target/debug/app"), "").unwrap();
+        fs::create_dir(dir.join("src")).unwrap();
+        fs::write(dir.join("src/main.rs"), "").unwrap();
+
+        let walk = walk(&dir, WORKERS).unwrap();
+        let expected = vec![
+            dir.clone(),
+            dir.join("node_modules"),
+            dir.join("src"),
+            dir.join("src/main.rs"),
+            dir.join("target"),
+        ];
+        assert_eq!(all_paths(&walk.index), expected);
+        assert_eq!(walk.skipped, 0);
+
+        // Walked directly, a skipped name is the root and is entered.
+        let walk = super::walk(&dir.join("target"), WORKERS).unwrap();
+        assert!(all_paths(&walk.index).contains(&dir.join("target/debug/app")));
         fs::remove_dir_all(&dir).unwrap();
     }
 
