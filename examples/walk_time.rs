@@ -32,12 +32,9 @@ fn main() {
     };
     let elapsed = start.elapsed();
 
-    let mut entries = 0;
-    while walk.index.name(entries).is_some() {
-        entries += 1;
-    }
     println!(
-        "{root}: {entries} entries, {} skipped, {workers} workers, {elapsed:?}",
+        "{root}: {} entries, {} skipped, {workers} workers, {elapsed:?}",
+        walk.index.len(),
         walk.skipped
     );
 }

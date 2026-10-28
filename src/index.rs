@@ -162,6 +162,15 @@ impl Index {
         &self.masks
     }
 
+    // Number of entries. IDs run from 0 to `len() - 1`.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     // Number of folders above `id`, so a root is 0.
     pub fn depth(&self, id: u32) -> Option<u32> {
         let mut depth = 0;
@@ -195,6 +204,16 @@ mod tests {
         assert_eq!(index.name(0), None);
         assert_eq!(index.display_name(0), None);
         assert_eq!(index.full_path(0), None);
+    }
+
+    #[test]
+    fn len_counts_entries() {
+        let mut index = Index::new();
+        assert!(index.is_empty());
+        index.push("c", u32::MAX, true, 0, 0).unwrap();
+        index.push("a.txt", 0, false, 0, 0).unwrap();
+        assert_eq!(index.len(), 2);
+        assert!(!index.is_empty());
     }
 
     #[test]

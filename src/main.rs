@@ -50,7 +50,7 @@ fn index_all(folders: &[String]) -> Vec<Index> {
         let start = Instant::now();
         match oxidex::walk::walk(Path::new(folder), workers) {
             Ok(walk) => {
-                let entries = walk.index.masks().len();
+                let entries = walk.index.len();
                 eprintln!("{folder}: {entries} entries in {:.0?}", start.elapsed());
                 indexes.push(walk.index);
             }
