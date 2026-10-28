@@ -3,9 +3,9 @@
 // scanning the index and keeping the best hits is search.rs. See RANKING.md,
 // "Matching rules" and "Match quality".
 //
-// A new kind of match is a new `Tier` variant plus a check in `match_name`.
-// It must keep `Query::may_match` true for every name it can match, or
-// search skips those names before `match_name` sees them.
+// Adding a tier: see the overview at the top of search.rs. `may_match` runs
+// first, so anything a new tier matches must pass it, or search skips the
+// name before `match_name` sees it.
 use crate::index::{Index, char_mask};
 
 // Ordered best first, so sorting by tier puts exact matches on top. Tiers
