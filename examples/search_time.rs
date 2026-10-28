@@ -28,7 +28,7 @@ fn main() {
         }
     };
     let index = walk.index;
-    println!("{root}: {} entries", entry_count(&index));
+    println!("{root}: {} entries", index.len());
 
     for query in args {
         let mut times = Vec::new();
@@ -65,14 +65,6 @@ fn main() {
             median(&mut times)
         );
     }
-}
-
-fn entry_count(index: &Index) -> u32 {
-    let mut entries = 0;
-    while index.name(entries).is_some() {
-        entries += 1;
-    }
-    entries
 }
 
 // The baseline: a plain substring check on every lowercased name.

@@ -290,10 +290,8 @@ mod tests {
 
     fn all_paths(index: &Index) -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        let mut id = 0;
-        while index.name(id).is_some() {
+        for id in 0..index.len() as u32 {
             paths.push(index.full_path(id).unwrap());
-            id += 1;
         }
         paths.sort();
         paths
