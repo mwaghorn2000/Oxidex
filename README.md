@@ -32,6 +32,9 @@ a prompt. Start typing and the results update under the query:
 - If you pipe input in instead of typing, it reads one query per line and
   prints the results. That's handy for scripts.
 - Use `--release`. A debug build works, but it's much slower.
+- Dependency, build and cache folders (`node_modules`, `target`, `.git`,
+  `.cache` and a few others) are listed but not entered, so their contents
+  don't bury your own files. The full list is `SKIP_DIRS` in `src/walk.rs`.
 
 ### Things to try
 
@@ -81,11 +84,12 @@ The full plan, including what's decided and what's still open, is in
 ```
 src/
 ├── main.rs     the command-line app
-├── lib.rs      the library (uses only the standard library)
+├── lib.rs      the library (std, plus serde for saving history)
 ├── walk.rs     crawls a folder on several threads and builds an Index
 ├── index.rs    the Index: every name, its parent folder, size and time
 ├── search.rs   matching, tiers and keeping the best results
-└── score.rs    ranking signals (match quality, modified time)
+├── score.rs    ranking signals (match quality, modified time)
+└── history.rs  files you've opened and their frecency, saved as JSON
 examples/
 ├── walk_time.rs     times a walk
 └── search_time.rs   times searches against a naive baseline
@@ -124,9 +128,9 @@ change without discussion.
 
 ## What's next
 
-- Skip folders like `node_modules`, `target` and `.git`, which currently
-  flood the results.
 - Find typos in partly typed names (`the binding of iscac`).
-- Remember which files you open, and rank them higher.
+- Rank files you open often higher, and let a daily-opened file jump above
+  better matches. The `History` type is in; the frontend owns it and
+  records opens. Next it gets wired into search.
 - Save the index to disk, so it doesn't re-walk on every start.
 - The real app: popup, global hotkey, tray.
