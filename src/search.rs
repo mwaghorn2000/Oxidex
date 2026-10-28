@@ -1160,4 +1160,14 @@ mod tests {
         assert_eq!(result, Err(Cancelled));
         assert!(out.is_empty());
     }
+
+    // The root shows its full path, but must still be found by its own name.
+    #[test]
+    fn root_is_exact_match_for_its_last_part() {
+        let mut index = Index::new();
+        let root = index.push_root("/home/me/myproj", true, 0, 0).unwrap();
+        index.push("myproj.txt", root, false, 0, 0).unwrap();
+        let hits = results(&index, "myproj", 10);
+        assert_eq!(hits[0], ("/home/me/myproj".to_string(), Tier::Exact));
+    }
 }
