@@ -24,6 +24,10 @@ const SKIP_DIRS: &[&str] = &[
     ".tox",
     ".gradle",
     ".next",
+    ".vscode-server",
+    ".cache",
+    ".cargo",
+    ".rustup",
 ];
 
 pub struct Walk {
