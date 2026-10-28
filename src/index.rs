@@ -66,8 +66,39 @@ impl Index {
         size: u64,
         modified: u64,
     ) -> Result<u32, NameTooLong> {
+        self.push_entry(name, name, parent, is_dir, size, modified)
+    }
+
+    // Appends a root and returns its ID. `path` is its full path, shown at the
+    // start of every result path under it. Only its last part is matched,
+    // like any other folder's name, so a root can be found by its own name.
+    // A path with no last part ("/", "C:\") is matched whole.
+    pub fn push_root(
+        &mut self,
+        path: &str,
+        is_dir: bool,
+        size: u64,
+        modified: u64,
+    ) -> Result<u32, NameTooLong> {
+        let last = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path);
+        self.push_entry(last, path, u32::MAX, is_dir, size, modified)
+    }
+
+    // `name` is what search matches; `display` is what results show.
+    fn push_entry(
+        &mut self,
+        name: &str,
+        display: &str,
+        parent: u32,
+        is_dir: bool,
+        size: u64,
+        modified: u64,
+    ) -> Result<u32, NameTooLong> {
         let lowercase = name.to_lowercase();
-        if lowercase.len() > u16::MAX as usize || name.len() > u16::MAX as usize {
+        if lowercase.len() > u16::MAX as usize || display.len() > u16::MAX as usize {
             return Err(NameTooLong);
         }
         let id = self.entries.len() as u32;
@@ -75,7 +106,7 @@ impl Index {
             name_start: self.names.len() as u32,
             name_len: lowercase.len() as u16,
             display_start: self.display_names.len() as u32,
-            display_len: name.len() as u16,
+            display_len: display.len() as u16,
             parent,
             is_dir,
             size,
@@ -83,7 +114,7 @@ impl Index {
         });
         self.masks.push(char_mask(&lowercase));
         self.names.push_str(&lowercase);
-        self.display_names.push_str(name);
+        self.display_names.push_str(display);
         Ok(id)
     }
 
@@ -176,6 +207,27 @@ mod tests {
             index.full_path(2),
             Some(Path::new("c").join("docs").join("a.txt"))
         );
+    }
+
+    #[test]
+    fn root_matches_by_last_part_and_shows_full_path() {
+        let mut index = Index::new();
+        let root = index.push_root("/home/Me/Projects", true, 0, 0).unwrap();
+        let file = index.push("a.txt", root, false, 0, 0).unwrap();
+        assert_eq!(index.name(root), Some("projects"));
+        assert_eq!(index.masks()[root as usize], char_mask("projects"));
+        assert_eq!(index.display_name(root), Some("/home/Me/Projects"));
+        assert_eq!(
+            index.full_path(file),
+            Some(Path::new("/home/Me/Projects").join("a.txt"))
+        );
+    }
+
+    #[test]
+    fn root_with_no_last_part_matches_whole() {
+        let mut index = Index::new();
+        let root = index.push_root("/", true, 0, 0).unwrap();
+        assert_eq!(index.name(root), Some("/"));
     }
 
     #[test]
