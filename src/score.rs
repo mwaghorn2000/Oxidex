@@ -95,13 +95,14 @@ pub fn total(scorers: &[Box<dyn Scorer>], c: &Candidate) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::NO_PARENT;
 
     const DAY: u64 = 86_400;
     const NOW: u64 = 1_000 * DAY;
 
     fn index_modified_at(modified: u64) -> Index {
         let mut index = Index::new();
-        index.push("a.txt", u32::MAX, false, 0, modified).unwrap();
+        index.push("a.txt", NO_PARENT, false, 0, modified).unwrap();
         index
     }
 
