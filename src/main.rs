@@ -60,14 +60,14 @@ fn index_all(folders: &[String]) -> Vec<Index> {
     indexes
 }
 
-// Line mode: one query per line, results printed below it.
+// Line mode: one query per line, results printed below it. Line mode only
+// runs with piped input, so there's no prompt: nobody is there to see it,
+// and it would end up mixed into the output.
 fn lines(indexes: &[Index]) {
     let scorers = default_scorers();
     let mut out = Vec::new();
     let mut line = String::new();
     loop {
-        print!("> ");
-        let _ = io::stdout().flush();
         line.clear();
         match io::stdin().lock().read_line(&mut line) {
             Ok(0) | Err(_) => return,
