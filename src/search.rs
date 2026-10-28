@@ -271,31 +271,6 @@ mod tests {
     }
 
     #[test]
-    fn whole_name_is_exact() {
-        assert_eq!(tier_of(&["readme.md"], "readme.md"), Some(Tier::Exact));
-    }
-
-    #[test]
-    fn stem_is_exact() {
-        assert_eq!(tier_of(&["readme.md"], "readme"), Some(Tier::Exact));
-    }
-
-    #[test]
-    fn start_of_name_is_prefix() {
-        assert_eq!(tier_of(&["readme.md"], "read"), Some(Tier::Prefix));
-    }
-
-    #[test]
-    fn scattered_letters_are_subsequence() {
-        assert_eq!(tier_of(&["readme.md"], "rdm"), Some(Tier::Subsequence));
-    }
-
-    #[test]
-    fn letters_out_of_order_dont_match() {
-        assert_eq!(tier_of(&["readme.md"], "mdr"), None);
-    }
-
-    #[test]
     fn query_is_case_insensitive() {
         assert_eq!(tier_of(&["ReadMe.md"], "README"), Some(Tier::Exact));
     }
@@ -336,13 +311,6 @@ mod tests {
         assert_eq!(tier_of(&["Café Menu.pdf"], "CAFÉ"), Some(Tier::Prefix));
     }
 
-    // 'é' is the bytes C3 A9. "ã©" is C3 A3 C2 A9, so a byte-wise subsequence
-    // would match 'é' across two different characters.
-    #[test]
-    fn non_ascii_match_does_not_split_characters() {
-        assert_eq!(tier_of(&["ã©xy"], "éxy"), None);
-    }
-
     #[test]
     fn one_letter_query_matches_exact_and_prefix_only() {
         let index = index_of(&["banana", "apple", "a.txt"]);
@@ -355,51 +323,11 @@ mod tests {
         assert_eq!(names(&index, "ab", 10), ["ab", "abc"]);
     }
 
-    #[test]
-    fn three_letter_query_matches_subsequence() {
-        assert_eq!(tier_of(&["xaxbxc"], "abc"), Some(Tier::Subsequence));
-    }
-
     fn names(index: &Index, query: &str, limit: usize) -> Vec<String> {
         results(index, query, limit)
             .into_iter()
             .map(|h| h.0)
             .collect()
-    }
-
-    // In the quality tests below, the better match is pushed second and has
-    // the longer name, so the tiebreaks alone would put it last.
-
-    #[test]
-    fn prefix_closer_to_full_name_ranks_higher() {
-        let index = index_of(&["readme_old_backup", "readme"]);
-        assert_eq!(names(&index, "read", 10), ["readme", "readme_old_backup"]);
-    }
-
-    #[test]
-    fn subsequence_word_starts_rank_higher() {
-        let index = index_of(&["xfoxbar", "foo_bar.txt"]);
-        assert_eq!(names(&index, "fba", 10), ["foo_bar.txt", "xfoxbar"]);
-    }
-
-    #[test]
-    fn subsequence_consecutive_letters_rank_higher() {
-        let index = index_of(&["xaxbxc", "xxxabcxxxx"]);
-        assert_eq!(names(&index, "abc", 10), ["xxxabcxxxx", "xaxbxc"]);
-    }
-
-    #[test]
-    fn subsequence_smaller_gaps_rank_higher() {
-        let index = index_of(&["xaxxxxxxbx", "xaxbxxxxxxxx"]);
-        assert_eq!(names(&index, "abx", 10), ["xaxbxxxxxxxx", "xaxxxxxxbx"]);
-    }
-
-    // Greedy left-to-right matching would take the first 'a' and leave a big
-    // gap, scoring below "xabxc". The tight "abc" at the end scores above it.
-    #[test]
-    fn subsequence_finds_tightest_match() {
-        let index = index_of(&["xabxc", "xaxxxxxxxx_abc"]);
-        assert_eq!(names(&index, "abc", 10), ["xaxxxxxxxx_abc", "xabxc"]);
     }
 
     #[test]
@@ -496,60 +424,6 @@ mod tests {
     }
 
     #[test]
-    fn one_typo_matches() {
-        assert_eq!(tier_of(&["slack.exe"], "slark"), Some(Tier::Levenshtein));
-    }
-
-    #[test]
-    fn extra_letter_matches() {
-        assert_eq!(tier_of(&["slack.exe"], "slacck"), Some(Tier::Levenshtein));
-    }
-
-    // Plain Levenshtein counts a swap as 2 edits, over the 1 allowed here.
-    #[test]
-    fn swapped_letters_are_one_edit() {
-        assert_eq!(tier_of(&["readme.md"], "raedme"), Some(Tier::Levenshtein));
-    }
-
-    // "maim.rs" is 3 edits from the stem "main", but 1 from the whole name.
-    #[test]
-    fn typo_against_whole_name_matches() {
-        assert_eq!(tier_of(&["main.rs"], "maim.rs"), Some(Tier::Levenshtein));
-    }
-
-    #[test]
-    fn short_query_allows_one_edit() {
-        assert_eq!(tier_of(&["slack.exe"], "sxaxk"), None);
-    }
-
-    #[test]
-    fn long_query_allows_two_edits() {
-        let tier = tier_of(&["documentation.pdf"], "docuemntation");
-        assert_eq!(tier, Some(Tier::Levenshtein));
-    }
-
-    // 'y' and 'x' are both missing from the name: exactly the 2 edits a
-    // 13-letter query allows, so the missing-letter filter must let it by.
-    #[test]
-    fn two_missing_letters_within_two_edits_match() {
-        let tier = tier_of(&["documentation.pdf"], "dycumentatiox");
-        assert_eq!(tier, Some(Tier::Levenshtein));
-    }
-
-    // Typos rank above subsequence matches, so a 3-letter query like "rdm"
-    // would otherwise put names like "adm" above "readme".
-    #[test]
-    fn short_query_has_no_typo_matching() {
-        assert_eq!(tier_of(&["abd"], "abc"), None);
-    }
-
-    // 'é' is two bytes, so comparing bytes would count this as two edits.
-    #[test]
-    fn typo_counts_characters_not_bytes() {
-        assert_eq!(tier_of(&["café.txt"], "cafe"), Some(Tier::Levenshtein));
-    }
-
-    #[test]
     fn typos_rank_between_prefix_and_subsequence() {
         let index = index_of(&["s_l_a_c_k", "slick", "slack_notes"]);
         let hits = results(&index, "slack", 10);
@@ -569,12 +443,6 @@ mod tests {
     fn typo_beats_a_full_page_of_subsequence_matches() {
         let index = index_of(&["xrxaxexdxmxex1", "xrxaxexdxmxex2", "readme.md"]);
         assert_eq!(names(&index, "raedme", 2), ["readme.md", "xrxaxexdxmxex1"]);
-    }
-
-    #[test]
-    fn fewer_edits_rank_higher() {
-        let index = index_of(&["notexooxs", "notebooxs"]);
-        assert_eq!(names(&index, "notebooks", 10), ["notebooxs", "notexooxs"]);
     }
 
     // The exact match is also 0 edits from the query; it must appear once.
