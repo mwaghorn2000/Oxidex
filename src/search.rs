@@ -115,11 +115,8 @@ pub fn search(
                 out.clear();
                 return Err(Cancelled);
             }
-            // Each distinct query character missing from the name needs at
-            // least one edit, and every tier but typos needs none missing. So
-            // a name missing more than `max_edits` can't match at all. This
-            // rules out most names without reading them.
-            if (query.mask & !mask).count_ones() as usize > query.max_edits {
+            // Rules out most names without reading them.
+            if !query.may_match(mask) {
                 continue;
             }
             let Some(name) = index.name(id) else {

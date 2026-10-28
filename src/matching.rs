@@ -4,6 +4,8 @@
 // "Matching rules" and "Match quality".
 //
 // A new kind of match is a new `Tier` variant plus a check in `match_name`.
+// It must keep `Query::may_match` true for every name it can match, or
+// search skips those names before `match_name` sees them.
 use crate::index::{Index, char_mask};
 
 // Ordered best first, so sorting by tier puts exact matches on top. Tiers
@@ -48,7 +50,7 @@ pub(crate) struct Query {
     // Other queries are matched by `char`.
     pub(crate) ascii: bool,
     pub(crate) max_edits: usize,
-    // `char_mask` of `text`, for the missing-character filter in `search`.
+    // `char_mask` of `text`, for `may_match`.
     pub(crate) mask: u64,
 }
 
@@ -73,6 +75,15 @@ impl Query {
             text,
             chars,
         }
+    }
+
+    // Quick filter on a name's `char_mask`, run on every name before
+    // `match_name`. Each distinct query character missing from the name needs
+    // at least one edit, and every tier but typos needs none missing. So a
+    // name missing more than `max_edits` can't match in any tier.
+    #[inline]
+    pub(crate) fn may_match(&self, mask: u64) -> bool {
+        (self.mask & !mask).count_ones() as usize <= self.max_edits
     }
 }
 
