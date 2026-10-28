@@ -4,7 +4,7 @@
 // Results are ranked in three layers, each with its own place to extend:
 //
 // 1. Tier (`Tier`): what kind of match it is. A new kind of match is a new
-//    `Tier` variant plus a check in `match_name`.
+//    `Tier` variant plus a check in `match_name`, both in matching.rs.
 // 2. Score (`Hit::score`): how good the match is within its tier. It's the
 //    total of the `Scorer`s passed to `search`: match quality from
 //    `match_name`, plus signals like modified time. A new signal is a new
@@ -15,27 +15,10 @@
 use std::cmp::Ordering;
 use std::sync::atomic::{self, AtomicU64};
 
-use crate::index::{Index, char_mask};
+use crate::index::Index;
+pub use crate::matching::Tier;
+use crate::matching::{Query, Scratch, folders_match, match_name};
 use crate::score::{Candidate, Scorer, total};
-
-// Ordered best first, so sorting by tier puts exact matches on top. Tiers
-// are strict: a hit in a better tier always ranks above one in a worse tier,
-// whatever their scores.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Tier {
-    // The whole name, or the name without its extension.
-    Exact,
-    // The start of the name.
-    Prefix,
-    // Within a few typos (edits) of the name, with or without its extension.
-    // A swap of two neighbouring letters counts as one edit. Ranked above
-    // subsequence matches: a near-miss of the whole name says more than the
-    // query's letters scattered through a long name ("raedme" should find
-    // "readme.md" before "deprecatedMethod.js").
-    Levenshtein,
-    // The query's characters appear in the name in order, with gaps allowed.
-    Subsequence,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
@@ -90,15 +73,6 @@ impl<'a> Cancel<'a> {
 // within microseconds.
 const CANCEL_CHECK_EVERY: u32 = 4096;
 
-// Subsequence scoring, after fzf: every matched character earns `MATCH`, plus
-// a bonus at the start of a word or for following the previous match. Gaps
-// between matches cost a fixed amount plus a little per skipped character.
-const MATCH: i32 = 16;
-const WORD_START: i32 = 8;
-const CONSECUTIVE: i32 = 8;
-const GAP_START: i32 = 3;
-const GAP_EXTEND: i32 = 1;
-
 // Fills `out` with up to `limit` hits for `query` from all of `indexes`,
 // best first. An exact match is the whole name or the name without its
 // extension. Matching is case-insensitive. Hits within a tier are ranked by
@@ -141,11 +115,8 @@ pub fn search(
                 out.clear();
                 return Err(Cancelled);
             }
-            // Each distinct query character missing from the name needs at
-            // least one edit, and every tier but typos needs none missing. So
-            // a name missing more than `max_edits` can't match at all. This
-            // rules out most names without reading them.
-            if (query.mask & !mask).count_ones() as usize > query.max_edits {
+            // Rules out most names without reading them.
+            if !query.may_match(mask) {
                 continue;
             }
             let Some(name) = index.name(id) else {
@@ -182,142 +153,6 @@ pub fn search(
     Ok(())
 }
 
-// The query in the forms matching needs, worked out once per search.
-struct Query {
-    // Lowercased, to match the lowercased names in the index. In path mode,
-    // only the part after the last slash.
-    text: String,
-    // Path mode: the lowercased parts before the last slash, outermost first.
-    // Empty when the query has no slash.
-    folders: Vec<String>,
-    chars: Vec<char>,
-    // ASCII bytes never occur inside a multi-byte UTF-8 character, so an
-    // ASCII query can be matched byte by byte without splitting characters.
-    // Other queries are matched by `char`.
-    ascii: bool,
-    max_edits: usize,
-    // `char_mask` of `text`, for the missing-character filter in `search`.
-    mask: u64,
-}
-
-impl Query {
-    fn new(query: &str) -> Query {
-        let lowercase = query.to_lowercase();
-        let mut parts: Vec<&str> = lowercase.split(['/', '\\']).collect();
-        let text = parts.pop().unwrap_or_default().to_string();
-        // Empty parts ("/notes", "docs//notes") would match any folder, so
-        // they're dropped rather than checked.
-        let folders = parts
-            .into_iter()
-            .filter(|p| !p.is_empty())
-            .map(String::from)
-            .collect();
-        let chars: Vec<char> = text.chars().collect();
-        Query {
-            folders,
-            ascii: text.is_ascii(),
-            max_edits: max_edits(chars.len()),
-            mask: char_mask(&text),
-            text,
-            chars,
-        }
-    }
-}
-
-// Buffers reused for every name, so matching doesn't allocate per name.
-#[derive(Default)]
-struct Scratch {
-    // A name decoded into `char`s, for non-ASCII matching.
-    name_chars: Vec<char>,
-    // Rows of the edit-distance table.
-    rows: (Vec<usize>, Vec<usize>, Vec<usize>),
-}
-
-// Typo allowance by query length in characters. Capped at 2. Short queries
-// get none: typos rank above subsequence matches, and a 3-letter query is
-// usually an abbreviation ("rdm" for "readme"), not a typo of "adm".
-fn max_edits(query_len: usize) -> usize {
-    match query_len {
-        0..=3 => 0,
-        4..=7 => 1,
-        _ => 2,
-    }
-}
-
-// Fewest edits between the query and either the whole name or its stem, if
-// no more than `query.max_edits`. The stem is what people usually mistype
-// ("slark" for "slack.exe"); the whole name covers typos in queries with an
-// extension.
-fn typo_edits(name: &str, stem: &str, query: &Query, scratch: &mut Scratch) -> Option<usize> {
-    let max = query.max_edits;
-    let has_ext = stem.len() < name.len();
-    let Scratch { name_chars, rows } = scratch;
-    // Unlike the subsequence check, an ASCII query needs `char`s here when
-    // the name isn't ASCII: 'é' is two bytes, so bytes would count it twice.
-    if query.ascii && name.is_ascii() {
-        let q = query.text.as_bytes();
-        let whole = edit_distance(name.as_bytes(), q, max, rows);
-        if !has_ext {
-            return whole;
-        }
-        let stem = edit_distance(stem.as_bytes(), q, max, rows);
-        return whole.into_iter().chain(stem).min();
-    }
-    name_chars.clear();
-    name_chars.extend(name.chars());
-    let whole = edit_distance(name_chars, &query.chars, max, rows);
-    if !has_ext {
-        return whole;
-    }
-    let stem_len = stem.chars().count();
-    let stem = edit_distance(&name_chars[..stem_len], &query.chars, max, rows);
-    whole.into_iter().chain(stem).min()
-}
-
-// Edit distance between `a` and `b` if it's at most `max`, else `None`.
-// Levenshtein, plus a swap of two neighbouring letters counts as one edit
-// (optimal string alignment), since swaps are the most common typo. Gives up
-// early: when the length difference alone is over `max`, or when every cell
-// in a row is, since later rows can't be lower. Generic for the same
-// bytes-or-`char`s reason as `subsequence_score`.
-fn edit_distance<T: Copy + PartialEq>(
-    a: &[T],
-    b: &[T],
-    max: usize,
-    rows: &mut (Vec<usize>, Vec<usize>, Vec<usize>),
-) -> Option<usize> {
-    if a.len().abs_diff(b.len()) > max {
-        return None;
-    }
-    // Three rows of the usual table: `curr` for this character of `a`, `prev`
-    // for the one before, and `prev2` before that, which swaps look back to.
-    let (prev2, prev, curr) = rows;
-    prev2.clear();
-    prev.clear();
-    prev.extend(0..=b.len());
-    for (i, &x) in a.iter().enumerate() {
-        curr.clear();
-        curr.push(i + 1);
-        let mut row_min = i + 1;
-        for (j, &y) in b.iter().enumerate() {
-            let substitute = prev[j] + usize::from(x != y);
-            let mut cell = substitute.min(prev[j + 1] + 1).min(curr[j] + 1);
-            if i > 0 && j > 0 && x == b[j - 1] && a[i - 1] == y {
-                cell = cell.min(prev2[j - 1] + 1);
-            }
-            curr.push(cell);
-            row_min = row_min.min(cell);
-        }
-        if row_min > max {
-            return None;
-        }
-        std::mem::swap(prev2, prev);
-        std::mem::swap(prev, curr);
-    }
-    let distance = prev[b.len()];
-    (distance <= max).then_some(distance)
-}
-
 // Adds `hit` to `out` if there's room or it beats the worst kept hit.
 fn keep(indexes: &[Index], limit: usize, out: &mut Vec<Hit>, worst: &mut Option<usize>, hit: Hit) {
     if out.len() < limit {
@@ -331,158 +166,6 @@ fn keep(indexes: &[Index], limit: usize, out: &mut Vec<Hit>, worst: &mut Option<
         out[w] = hit;
         *worst = Some(find_worst(indexes, out));
     }
-}
-
-// Decides the tier and match quality (0 to 1000) of `name`, or `None` if it
-// doesn't match. Checks run best tier first, so a name gets its best tier.
-fn match_name(name: &str, query: &Query, scratch: &mut Scratch) -> Option<(Tier, i32)> {
-    let q = query.text.as_str();
-    let stem = stem_of(name);
-    // A whole-name match ranks just above a match without the extension.
-    if name == q {
-        return Some((Tier::Exact, 1000));
-    }
-    if stem == q {
-        return Some((Tier::Exact, 900));
-    }
-    if name.starts_with(q) {
-        // The less of the name left over, the closer to an exact match.
-        let score = (1000 * q.len() / name.len()) as i32;
-        return Some((Tier::Prefix, score));
-    }
-    // 1–2 character queries stop here. Almost every name contains one or two
-    // given letters somewhere, so a subsequence match says nothing useful and
-    // scoring them all is slow. Typos already need 4+ characters.
-    if query.chars.len() < 3 {
-        return None;
-    }
-    if query.max_edits > 0
-        && let Some(edits) = typo_edits(name, stem, query, scratch)
-    {
-        // One edit scores 1000, two score 500. Zero edits would have been an
-        // exact match above.
-        return Some((Tier::Levenshtein, 1000 / edits.max(1) as i32));
-    }
-    let score = if query.ascii {
-        subsequence_score(name.as_bytes(), q.as_bytes())
-    } else {
-        let name_chars = &mut scratch.name_chars;
-        name_chars.clear();
-        name_chars.extend(name.chars());
-        subsequence_score(name_chars, &query.chars)
-    }?;
-    Some((Tier::Subsequence, score))
-}
-
-// Path mode: true if each folder part matches a folder above `id`, in order.
-// The last part matches the nearest such folder and each earlier part one
-// further up, so `a/b/x` needs `b` inside `a`. Taking the nearest match each
-// time never misses a chain that a later choice would have found. Parts
-// match as a subsequence, so `dcs` matches `docs`.
-fn folders_match(index: &Index, id: u32, folders: &[String]) -> bool {
-    // `None` means the parents form a cycle. The depth also bounds the walk.
-    let Some(depth) = index.depth(id) else {
-        return false;
-    };
-    let mut remaining = folders.len();
-    let mut curr = id;
-    for _ in 0..depth {
-        if remaining == 0 {
-            break;
-        }
-        let Some(parent) = index.parent(curr) else {
-            return false;
-        };
-        let Some(name) = index.name(parent) else {
-            return false;
-        };
-        if in_order(name, &folders[remaining - 1]) {
-            remaining -= 1;
-        }
-        curr = parent;
-    }
-    remaining == 0
-}
-
-// True if `part`'s characters appear in `name` in order. Compares `char`s,
-// so it works for any query; it's only run on a hit's few folders.
-fn in_order(name: &str, part: &str) -> bool {
-    let mut chars = name.chars();
-    part.chars().all(|p| chars.any(|n| n == p))
-}
-
-// The name without its extension. A leading dot starts the name
-// (".bashrc"), not an extension.
-fn stem_of(name: &str) -> &str {
-    match name.rfind('.') {
-        Some(dot) if dot > 0 => &name[..dot],
-        _ => name,
-    }
-}
-
-// Scores the tightest match of `query` in `name`, or `None` if it isn't a
-// subsequence. `query` must not be empty. Generic so the same code matches
-// bytes (ASCII queries) and `char`s (everything else).
-fn subsequence_score<T: Copy + PartialEq + Into<char>>(name: &[T], query: &[T]) -> Option<i32> {
-    // Forward pass: where the first complete match ends.
-    let mut q = 0;
-    let mut end = None;
-    for (i, &c) in name.iter().enumerate() {
-        if c == query[q] {
-            q += 1;
-            if q == query.len() {
-                end = Some(i);
-                break;
-            }
-        }
-    }
-    let end = end?;
-
-    // Backward pass from `end`: the latest start, so the match is as tight
-    // as it can be.
-    let mut q = query.len();
-    let mut start = end;
-    for i in (0..=end).rev() {
-        if name[i] == query[q - 1] {
-            q -= 1;
-            if q == 0 {
-                start = i;
-                break;
-            }
-        }
-    }
-
-    // Score the match inside `start..=end`. The weights are the constants at
-    // the top of the file; tune them there.
-    let mut score = 0;
-    let mut q = 0;
-    let mut prev: Option<usize> = None;
-    for i in start..=end {
-        if q == query.len() || name[i] != query[q] {
-            continue;
-        }
-        score += MATCH;
-        if i == 0 || is_separator(name[i - 1].into()) {
-            score += WORD_START;
-        }
-        match prev {
-            Some(p) if p + 1 == i => score += CONSECUTIVE,
-            Some(p) => score -= GAP_START + GAP_EXTEND * (i - p - 2) as i32,
-            None => {}
-        }
-        prev = Some(i);
-        q += 1;
-    }
-
-    // Scale so a match that is all word starts and runs scores 1000.
-    let best = (MATCH + WORD_START + CONSECUTIVE) * query.len() as i32;
-    Some((score.max(0) * 1000 / best).min(1000))
-}
-
-// Characters that start a new word in a file name, for the word-start bonus.
-// Names are lowercased, so camelCase word starts aren't visible here.
-fn is_separator(c: char) -> bool {
-    matches!(c, '.' | '_' | '-' | ' ')
 }
 
 // The full result order. Best first: tier, then score, then shorter name,
@@ -541,19 +224,27 @@ mod tests {
         index
     }
 
-    // Display name and tier of each hit, in result order.
-    fn results(index: &Index, query: &str, limit: usize) -> Vec<(String, Tier)> {
+    // Hits for `query` with the default scorers, as the frontend would get
+    // them. The one place tests call `search`, apart from tests of its other
+    // parameters (scorers, cancellation).
+    fn run(indexes: &[Index], query: &str, limit: usize, now: u64) -> Vec<Hit> {
         let mut out = Vec::new();
         search(
-            std::slice::from_ref(index),
+            indexes,
             query,
             limit,
             &default_scorers(),
-            0,
+            now,
             &Cancel::never(),
             &mut out,
         )
         .unwrap();
+        out
+    }
+
+    // Display name and tier of each hit, in result order.
+    fn results(index: &Index, query: &str, limit: usize) -> Vec<(String, Tier)> {
+        let out = run(std::slice::from_ref(index), query, limit, 0);
         out.iter()
             .map(|hit| (index.display_name(hit.id).unwrap().to_string(), hit.tier))
             .collect()
@@ -580,37 +271,12 @@ mod tests {
     }
 
     #[test]
-    fn whole_name_is_exact() {
-        assert_eq!(tier_of(&["readme.md"], "readme.md"), Some(Tier::Exact));
-    }
-
-    #[test]
-    fn stem_is_exact() {
-        assert_eq!(tier_of(&["readme.md"], "readme"), Some(Tier::Exact));
-    }
-
-    #[test]
-    fn start_of_name_is_prefix() {
-        assert_eq!(tier_of(&["readme.md"], "read"), Some(Tier::Prefix));
-    }
-
-    #[test]
-    fn scattered_letters_are_subsequence() {
-        assert_eq!(tier_of(&["readme.md"], "rdm"), Some(Tier::Subsequence));
-    }
-
-    #[test]
-    fn letters_out_of_order_dont_match() {
-        assert_eq!(tier_of(&["readme.md"], "mdr"), None);
-    }
-
-    #[test]
     fn query_is_case_insensitive() {
         assert_eq!(tier_of(&["ReadMe.md"], "README"), Some(Tier::Exact));
     }
 
     #[test]
-    fn folders_match() {
+    fn folder_entries_match_by_name() {
         let mut index = Index::new();
         let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
         index.push("docs", root, true, 0, 0).unwrap();
@@ -645,13 +311,6 @@ mod tests {
         assert_eq!(tier_of(&["Café Menu.pdf"], "CAFÉ"), Some(Tier::Prefix));
     }
 
-    // 'é' is the bytes C3 A9. "ã©" is C3 A3 C2 A9, so a byte-wise subsequence
-    // would match 'é' across two different characters.
-    #[test]
-    fn non_ascii_match_does_not_split_characters() {
-        assert_eq!(tier_of(&["ã©xy"], "éxy"), None);
-    }
-
     #[test]
     fn one_letter_query_matches_exact_and_prefix_only() {
         let index = index_of(&["banana", "apple", "a.txt"]);
@@ -664,51 +323,11 @@ mod tests {
         assert_eq!(names(&index, "ab", 10), ["ab", "abc"]);
     }
 
-    #[test]
-    fn three_letter_query_matches_subsequence() {
-        assert_eq!(tier_of(&["xaxbxc"], "abc"), Some(Tier::Subsequence));
-    }
-
     fn names(index: &Index, query: &str, limit: usize) -> Vec<String> {
         results(index, query, limit)
             .into_iter()
             .map(|h| h.0)
             .collect()
-    }
-
-    // In the quality tests below, the better match is pushed second and has
-    // the longer name, so the tiebreaks alone would put it last.
-
-    #[test]
-    fn prefix_closer_to_full_name_ranks_higher() {
-        let index = index_of(&["readme_old_backup", "readme"]);
-        assert_eq!(names(&index, "read", 10), ["readme", "readme_old_backup"]);
-    }
-
-    #[test]
-    fn subsequence_word_starts_rank_higher() {
-        let index = index_of(&["xfoxbar", "foo_bar.txt"]);
-        assert_eq!(names(&index, "fba", 10), ["foo_bar.txt", "xfoxbar"]);
-    }
-
-    #[test]
-    fn subsequence_consecutive_letters_rank_higher() {
-        let index = index_of(&["xaxbxc", "xxxabcxxxx"]);
-        assert_eq!(names(&index, "abc", 10), ["xxxabcxxxx", "xaxbxc"]);
-    }
-
-    #[test]
-    fn subsequence_smaller_gaps_rank_higher() {
-        let index = index_of(&["xaxxxxxxbx", "xaxbxxxxxxxx"]);
-        assert_eq!(names(&index, "abx", 10), ["xaxbxxxxxxxx", "xaxxxxxxbx"]);
-    }
-
-    // Greedy left-to-right matching would take the first 'a' and leave a big
-    // gap, scoring below "xabxc". The tight "abc" at the end scores above it.
-    #[test]
-    fn subsequence_finds_tightest_match() {
-        let index = index_of(&["xabxc", "xaxxxxxxxx_abc"]);
-        assert_eq!(names(&index, "abc", 10), ["xaxxxxxxxx_abc", "xabxc"]);
     }
 
     #[test]
@@ -724,17 +343,7 @@ mod tests {
         let docs = index.push("docs", root, true, 0, 0).unwrap();
         let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
         let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
-        let mut out = Vec::new();
-        search(
-            &[index],
-            "a.txt",
-            10,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&[index], "a.txt", 10, 0);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [shallow, deep]);
     }
@@ -745,17 +354,7 @@ mod tests {
         let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
         let first = index.push("a.txt", root, false, 0, 0).unwrap();
         let second = index.push("a.txt", root, false, 0, 0).unwrap();
-        let mut out = Vec::new();
-        search(
-            &[index],
-            "a.txt",
-            10,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&[index], "a.txt", 10, 0);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [first, second]);
     }
@@ -770,17 +369,7 @@ mod tests {
 
     // Index number and display name of each hit, in result order.
     fn hits_across(indexes: &[Index], query: &str, limit: usize) -> Vec<(u32, String)> {
-        let mut out = Vec::new();
-        search(
-            indexes,
-            query,
-            limit,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(indexes, query, limit, 0);
         out.iter()
             .map(|hit| {
                 let name = indexes[hit.index as usize].display_name(hit.id).unwrap();
@@ -835,60 +424,6 @@ mod tests {
     }
 
     #[test]
-    fn one_typo_matches() {
-        assert_eq!(tier_of(&["slack.exe"], "slark"), Some(Tier::Levenshtein));
-    }
-
-    #[test]
-    fn extra_letter_matches() {
-        assert_eq!(tier_of(&["slack.exe"], "slacck"), Some(Tier::Levenshtein));
-    }
-
-    // Plain Levenshtein counts a swap as 2 edits, over the 1 allowed here.
-    #[test]
-    fn swapped_letters_are_one_edit() {
-        assert_eq!(tier_of(&["readme.md"], "raedme"), Some(Tier::Levenshtein));
-    }
-
-    // "maim.rs" is 3 edits from the stem "main", but 1 from the whole name.
-    #[test]
-    fn typo_against_whole_name_matches() {
-        assert_eq!(tier_of(&["main.rs"], "maim.rs"), Some(Tier::Levenshtein));
-    }
-
-    #[test]
-    fn short_query_allows_one_edit() {
-        assert_eq!(tier_of(&["slack.exe"], "sxaxk"), None);
-    }
-
-    #[test]
-    fn long_query_allows_two_edits() {
-        let tier = tier_of(&["documentation.pdf"], "docuemntation");
-        assert_eq!(tier, Some(Tier::Levenshtein));
-    }
-
-    // 'y' and 'x' are both missing from the name: exactly the 2 edits a
-    // 13-letter query allows, so the missing-letter filter must let it by.
-    #[test]
-    fn two_missing_letters_within_two_edits_match() {
-        let tier = tier_of(&["documentation.pdf"], "dycumentatiox");
-        assert_eq!(tier, Some(Tier::Levenshtein));
-    }
-
-    // Typos rank above subsequence matches, so a 3-letter query like "rdm"
-    // would otherwise put names like "adm" above "readme".
-    #[test]
-    fn short_query_has_no_typo_matching() {
-        assert_eq!(tier_of(&["abd"], "abc"), None);
-    }
-
-    // 'é' is two bytes, so comparing bytes would count this as two edits.
-    #[test]
-    fn typo_counts_characters_not_bytes() {
-        assert_eq!(tier_of(&["café.txt"], "cafe"), Some(Tier::Levenshtein));
-    }
-
-    #[test]
     fn typos_rank_between_prefix_and_subsequence() {
         let index = index_of(&["s_l_a_c_k", "slick", "slack_notes"]);
         let hits = results(&index, "slack", 10);
@@ -908,12 +443,6 @@ mod tests {
     fn typo_beats_a_full_page_of_subsequence_matches() {
         let index = index_of(&["xrxaxexdxmxex1", "xrxaxexdxmxex2", "readme.md"]);
         assert_eq!(names(&index, "raedme", 2), ["readme.md", "xrxaxexdxmxex1"]);
-    }
-
-    #[test]
-    fn fewer_edits_rank_higher() {
-        let index = index_of(&["notexooxs", "notebooxs"]);
-        assert_eq!(names(&index, "notebooks", 10), ["notebooxs", "notexooxs"]);
     }
 
     // The exact match is also 0 edits from the query; it must appear once.
@@ -942,17 +471,7 @@ mod tests {
     // Full path of each hit, in result order.
     fn paths(index: Index, query: &str) -> Vec<String> {
         let indexes = [index];
-        let mut out = Vec::new();
-        search(
-            &indexes,
-            query,
-            10,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&indexes, query, 10, 0);
         out.iter()
             .map(|h| {
                 indexes[0]
@@ -1006,17 +525,7 @@ mod tests {
     #[test]
     fn path_hit_is_ranked_by_file_part() {
         let indexes = [tree()];
-        let mut out = Vec::new();
-        search(
-            &indexes,
-            "docs/readme",
-            10,
-            &default_scorers(),
-            0,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&indexes, "docs/readme", 10, 0);
         assert_eq!(out[0].tier, Tier::Exact);
         assert_eq!(out[0].score, 900);
     }
@@ -1046,17 +555,7 @@ mod tests {
             .push("a.txt", root, false, 0, NOW - 365 * DAY)
             .unwrap();
         let new = index.push("a.txt", root, false, 0, NOW).unwrap();
-        let mut out = Vec::new();
-        search(
-            &[index],
-            "a.txt",
-            10,
-            &default_scorers(),
-            NOW,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&[index], "a.txt", 10, NOW);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [new, old]);
     }
@@ -1073,17 +572,7 @@ mod tests {
         index
             .push("readme_old_backup", root, false, 0, NOW)
             .unwrap();
-        let mut out = Vec::new();
-        search(
-            &[index],
-            "read",
-            10,
-            &default_scorers(),
-            NOW,
-            &Cancel::never(),
-            &mut out,
-        )
-        .unwrap();
+        let out = run(&[index], "read", 10, NOW);
         assert_eq!(out[0].id, 1);
     }
 

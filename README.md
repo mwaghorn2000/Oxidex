@@ -84,7 +84,8 @@ src/
 ├── lib.rs      the library (uses only the standard library)
 ├── walk.rs     crawls a folder on several threads and builds an Index
 ├── index.rs    the Index: every name, its parent folder, size and time
-├── search.rs   matching, tiers and keeping the best results
+├── search.rs   scanning the indexes and keeping the best results
+├── matching.rs tiers and match quality for one name, and path mode
 └── score.rs    ranking signals (match quality, modified time)
 examples/
 ├── walk_time.rs     times a walk
