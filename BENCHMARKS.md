@@ -60,6 +60,19 @@ waking. With 12 workers the queue rarely empties and there were about 6,800.
 So one worker now crawls on the calling thread with no queue or channel.
 Between 2 and 6 workers, the walk is slower than 12 and uses more CPU than 1.
 
+### Skipped folders
+
+The walk doesn't enter `node_modules`, `target`, `.git` and the others in
+`SKIP_DIRS`. Measured on a different machine from the tables above: Intel
+Core Ultra 5 226V (8 threads), WSL2, ext4, 8 workers, warm median of three.
+
+| Folder | Entries | Warm |
+|---|---|---|
+| `/home/mwagh`, before | 366,482 | 0.225 s |
+| `/home/mwagh`, skipping | 199,807 | 0.122 s |
+
+Skipping removes 45% of entries and roughly halves the walk.
+
 ## search
 
 ```sh

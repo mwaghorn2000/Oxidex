@@ -268,5 +268,6 @@ One commit each, about 200 lines or fewer, each building and passing tests:
 11. History and frecency, including tier jumping.
 
 Streaming and the search thread come once the app crate exists. History
-storage and skipping folders like `.git` and `node_modules` during the walk
-are decided when we reach them.
+storage is decided when we reach it. The walk skips the contents of folders
+like `.git` and `node_modules` (the fixed `SKIP_DIRS` list in `walk.rs`),
+but still indexes the folder itself.
