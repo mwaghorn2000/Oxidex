@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn folders_match() {
+    fn folder_entries_match_by_name() {
         let mut index = Index::new();
         let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
         index.push("docs", root, true, 0, 0).unwrap();
