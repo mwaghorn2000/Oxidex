@@ -1,4 +1,4 @@
-// The parent of a root entry, which has none.
+/// The parent of a root entry, which has none.
 pub const NO_PARENT: u32 = u32::MAX;
 
 pub struct Index {
@@ -58,7 +58,7 @@ pub(crate) fn fold_case(text: &str) -> String {
     lowercase
 }
 
-// Returned by `push` when a name is longer than `u16::MAX` bytes.
+/// Returned by `push` when a name is longer than `u16::MAX` bytes.
 #[derive(Debug, PartialEq, Eq)]
 pub struct NameTooLong;
 
@@ -80,7 +80,7 @@ impl Index {
         }
     }
 
-    // Appends an entry and returns its ID. `parent` is `NO_PARENT` for a root.
+    /// Appends an entry and returns its ID. `parent` is `NO_PARENT` for a root.
     pub fn push(
         &mut self,
         name: &str,
@@ -92,10 +92,10 @@ impl Index {
         self.push_entry(name, name, parent, is_dir, size, modified)
     }
 
-    // Appends a root and returns its ID. `path` is its full path, shown at the
-    // start of every result path under it. Only its last part is matched,
-    // like any other folder's name, so a root can be found by its own name.
-    // A path with no last part ("/", "C:\") is matched whole.
+    /// Appends a root and returns its ID. `path` is its full path, shown at the
+    /// start of every result path under it. Only its last part is matched,
+    /// like any other folder's name, so a root can be found by its own name.
+    /// A path with no last part ("/", "C:\") is matched whole.
     pub fn push_root(
         &mut self,
         path: &str,
@@ -170,13 +170,13 @@ impl Index {
         Some(parts.iter().rev().collect())
     }
 
-    // The folder `id` is in, or `None` for a root.
+    /// The folder `id` is in, or `None` for a root.
     pub fn parent(&self, id: u32) -> Option<u32> {
         let parent = self.entries.get(id as usize)?.parent;
         (parent != NO_PARENT).then_some(parent)
     }
 
-    // Seconds since 1970, or 0 if the OS couldn't say.
+    /// Seconds since 1970, or 0 if the OS couldn't say.
     pub fn modified(&self, id: u32) -> Option<u64> {
         Some(self.entries.get(id as usize)?.modified)
     }
@@ -185,7 +185,7 @@ impl Index {
         &self.masks
     }
 
-    // Number of entries. IDs run from 0 to `len() - 1`.
+    /// Number of entries. IDs run from 0 to `len() - 1`.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -194,7 +194,7 @@ impl Index {
         self.entries.is_empty()
     }
 
-    // Number of folders above `id`, so a root is 0.
+    /// Number of folders above `id`, so a root is 0.
     pub fn depth(&self, id: u32) -> Option<u32> {
         let mut depth = 0;
         let mut curr = self.entries.get(id as usize)?.parent;

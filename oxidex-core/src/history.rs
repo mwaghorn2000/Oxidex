@@ -1,12 +1,12 @@
-// Files opened through Oxidex, for the frecency signal. See RANKING.md,
-// "Frecency". The frontend owns a `History` and core never picks a file
-// location. The frontend's part:
-//
-// 1. At startup, load it with `read_from`, or start with `History::new`.
-// 2. After every walk, call `resolve`: entry IDs change with each walk.
-// 3. When the user opens a result, call `record_open`, then `resolve`, so
-//    a newly opened file gets its boost straight away.
-// 4. Save it with `write_to` whenever it likes.
+//! Files opened through Oxidex, for the frecency signal. See RANKING.md,
+//! "Frecency". The frontend owns a `History` and core never picks a file
+//! location. The frontend's part:
+//!
+//! 1. At startup, load it with `read_from`, or start with `History::new`.
+//! 2. After every walk, call `resolve`: entry IDs change with each walk.
+//! 3. When the user opens a result, call `record_open`, then `resolve`, so
+//!    a newly opened file gets its boost straight away.
+//! 4. Save it with `write_to` whenever it likes.
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -24,9 +24,9 @@ const MIN_GAP: u64 = 12 * HOUR;
 // A score halves every `HALF_LIFE`, so files you stopped using fade out.
 const HALF_LIFE: u64 = 7 * DAY;
 
-// Saved as JSON: `{"records": [{"path": ..., "score": ..., "counted_at": ...}]}`.
-// An object rather than a bare list, so fields can be added later without
-// breaking old files.
+/// Saved as JSON: `{"records": [{"path": ..., "score": ..., "counted_at": ...}]}`.
+/// An object rather than a bare list, so fields can be added later without
+/// breaking old files.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct History {
     records: Vec<Record>,
@@ -52,8 +52,8 @@ impl Record {
         Path::new(&self.path)
     }
 
-    // The score decayed to `now`, in seconds since 1970. A `now` before the
-    // last count means a wrong clock, so it gets no decay.
+    /// The score decayed to `now`, in seconds since 1970. A `now` before the
+    /// last count means a wrong clock, so it gets no decay.
     pub fn frecency(&self, now: u64) -> f64 {
         let age = now.saturating_sub(self.counted_at) as f64;
         self.score * 0.5_f64.powf(age / HALF_LIFE as f64)
@@ -69,12 +69,12 @@ impl History {
         &self.records
     }
 
-    // Links each record to the entry with its path in `indexes`, for `find`.
-    // Search works in entry IDs, and `Index` can't look a path up, so this
-    // does one pass per index: a hash lookup rules out almost every name,
-    // and only entries named like a record build a full path to compare.
-    // Records whose file isn't in any index stay unresolved. They're kept,
-    // and resolve again if the file comes back.
+    /// Links each record to the entry with its path in `indexes`, for `find`.
+    /// Search works in entry IDs, and `Index` can't look a path up, so this
+    /// does one pass per index: a hash lookup rules out almost every name,
+    /// and only entries named like a record build a full path to compare.
+    /// Records whose file isn't in any index stay unresolved. They're kept,
+    /// and resolve again if the file comes back.
     pub fn resolve(&mut self, indexes: &[Arc<Index>]) {
         self.resolved.clear();
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
@@ -114,8 +114,8 @@ impl History {
             .map(|&(index, id, r)| (index, id, &self.records[r]))
     }
 
-    // The record for entry `id` of index number `index`, as of the last
-    // `resolve`.
+    /// The record for entry `id` of index number `index`, as of the last
+    /// `resolve`.
     pub fn find(&self, index: u32, id: u32) -> Option<&Record> {
         let i = self
             .resolved
@@ -124,9 +124,9 @@ impl History {
         self.records.get(self.resolved[i].2)
     }
 
-    // Counts an open of `path` at `now`: +1 on the decayed score, unless the
-    // last counted open was under 12 hours ago. Fails for empty paths and
-    // paths that aren't UTF-8, which JSON can't hold.
+    /// Counts an open of `path` at `now`: +1 on the decayed score, unless the
+    /// last counted open was under 12 hours ago. Fails for empty paths and
+    /// paths that aren't UTF-8, which JSON can't hold.
     pub fn record_open(&mut self, path: &Path, now: u64) -> io::Result<()> {
         let Some(path) = path.to_str() else {
             return Err(invalid_input("path is not valid UTF-8"));
@@ -160,15 +160,15 @@ impl History {
         Ok(())
     }
 
-    // Writes the history as JSON.
+    /// Writes the history as JSON.
     pub fn write_to(&self, out: impl Write) -> io::Result<()> {
         let mut out = BufWriter::new(out);
         serde_json::to_writer_pretty(&mut out, self)?;
         out.flush()
     }
 
-    // Reads what `write_to` wrote. JSON that doesn't parse, or a record with
-    // an empty path or a negative score, is an `InvalidData` error.
+    /// Reads what `write_to` wrote. JSON that doesn't parse, or a record with
+    /// an empty path or a negative score, is an `InvalidData` error.
     pub fn read_from(input: impl Read) -> io::Result<History> {
         let history: History = serde_json::from_reader(BufReader::new(input))?;
         for r in &history.records {

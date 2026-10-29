@@ -33,17 +33,17 @@ const SKIP_DIRS: &[&str] = &[
 #[derive(Debug)]
 pub struct Walk {
     pub index: Index,
-    // Folders that couldn't be read, names that aren't valid UTF-8, and
-    // entries the OS failed to list.
+    /// Folders that couldn't be read, names that aren't valid UTF-8, and
+    /// entries the OS failed to list.
     pub skipped: u64,
 }
 
-// Crawls `root` and returns an index of everything under it. The root entry
-// shows its full canonical path, so `full_path` gives absolute paths, but is
-// matched by its last part like any other folder. Only
-// fails if `root` itself can't be read. `workers` is how many threads read
-// folders. One crawls on the calling thread and uses the least CPU; more
-// finish sooner.
+/// Crawls `root` and returns an index of everything under it. The root entry
+/// shows its full canonical path, so `full_path` gives absolute paths, but is
+/// matched by its last part like any other folder. Only
+/// fails if `root` itself can't be read. `workers` is how many threads read
+/// folders. One crawls on the calling thread and uses the least CPU; more
+/// finish sooner.
 pub fn walk(root: &Path, workers: NonZeroUsize) -> io::Result<Walk> {
     let root = fs::canonicalize(root)?;
     let meta = fs::metadata(&root)?;
@@ -251,10 +251,10 @@ fn push_entries(walk: &mut Walk, batch: Batch) -> Vec<(PathBuf, u32)> {
     dirs
 }
 
-// The search folders worth walking, in order: each made canonical, with
-// repeats and folders inside another listed folder dropped, so no file is
-// indexed twice (RANKING.md, "Input"). A folder that can't be made canonical
-// (it's missing, say) is kept as given, so `walk` reports the error.
+/// The search folders worth walking, in order: each made canonical, with
+/// repeats and folders inside another listed folder dropped, so no file is
+/// indexed twice (RANKING.md, "Input"). A folder that can't be made canonical
+/// (it's missing, say) is kept as given, so `walk` reports the error.
 pub fn distinct_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     let canonical: Vec<PathBuf> = roots
         .iter()
