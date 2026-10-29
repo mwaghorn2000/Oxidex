@@ -4,7 +4,8 @@
 // Results are ranked in three layers, each with its own place to extend:
 //
 // 1. Tier (`Tier`): what kind of match it is. A new kind of match is a new
-//    `Tier` variant plus a check in `match_name`, both in matching.rs.
+//    `Tier` variant plus a check in `match_name`, both in matching.rs, and
+//    `Query::may_match` must still let its names through.
 // 2. Score (`Hit::score`): how good the match is within its tier. It's the
 //    total of the `Scorer`s passed to `search`: match quality from
 //    `match_name`, plus signals like modified time. A new signal is a new
@@ -74,8 +75,7 @@ impl<'a> Cancel<'a> {
 const CANCEL_CHECK_EVERY: u32 = 4096;
 
 // Fills `out` with up to `limit` hits for `query` from all of `indexes`,
-// best first. An exact match is the whole name or the name without its
-// extension. Matching is case-insensitive. Hits within a tier are ranked by
+// best first. Matching is case-insensitive. Hits within a tier are ranked by
 // `scorers` (usually `score::default_scorers()`), with `now` in seconds since
 // 1970. If `cancel` fires, stops early, clears `out` so a partial list is
 // never shown, and returns `Cancelled`.
@@ -130,9 +130,8 @@ pub fn search(
             if !query.folders.is_empty() && !folders_match(index, id, &query.folders) {
                 continue;
             }
-            // RANKING SIGNALS are applied here, before the hit competes for a
-            // place in `out`. Add new ones to `default_scorers` in score.rs,
-            // not here.
+            // Scored before the hit competes for a place in `out`. New signals
+            // go in score.rs: see the top of this file.
             let candidate = Candidate {
                 index,
                 id,
