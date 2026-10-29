@@ -15,9 +15,10 @@ use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, queue};
 
+use oxidex::history::History;
 use oxidex::index::Index;
 use oxidex::score::{Scorer, default_scorers};
-use oxidex::search::{Cancel, Hit, search};
+use oxidex::search::{Cancel, Hit, Sources, search};
 
 // How many results to print per query in line mode.
 const LIMIT: usize = 20;
@@ -65,6 +66,8 @@ fn index_all(folders: &[String]) -> Vec<Index> {
 // and it would end up mixed into the output.
 fn lines(indexes: &[Index]) {
     let scorers = default_scorers();
+    // Empty: the CLI doesn't record opens yet.
+    let history = History::new();
     let mut out = Vec::new();
     let mut line = String::new();
     loop {
@@ -77,7 +80,7 @@ fn lines(indexes: &[Index]) {
         if query.is_empty() {
             continue;
         }
-        let elapsed = timed_search(indexes, query, LIMIT, &scorers, &mut out);
+        let elapsed = timed_search(indexes, &history, query, LIMIT, &scorers, &mut out);
         for (rank, hit) in out.iter().enumerate() {
             let index = &indexes[hit.index as usize];
             let path = index.full_path(hit.id).unwrap_or_default();
@@ -98,6 +101,8 @@ fn lines(indexes: &[Index]) {
 fn live(indexes: &[Index]) -> io::Result<()> {
     let _screen = Screen::enter()?;
     let scorers = default_scorers();
+    // Empty: the CLI doesn't record opens yet.
+    let history = History::new();
     let mut query = String::new();
     let mut out = Vec::new();
     let mut elapsed = Duration::ZERO;
@@ -123,7 +128,7 @@ fn live(indexes: &[Index]) -> io::Result<()> {
         let (_, rows) = terminal::size()?;
         // One row for the query, one for the status line.
         let limit = usize::from(rows).saturating_sub(2).max(1);
-        elapsed = timed_search(indexes, &query, limit, &scorers, &mut out);
+        elapsed = timed_search(indexes, &history, &query, limit, &scorers, &mut out);
     }
 }
 
@@ -226,6 +231,7 @@ fn fit(folder: &str, name: &str, width: usize) -> (String, String) {
 
 fn timed_search(
     indexes: &[Index],
+    history: &History,
     query: &str,
     limit: usize,
     scorers: &[Box<dyn Scorer>],
@@ -233,7 +239,16 @@ fn timed_search(
 ) -> Duration {
     let start = Instant::now();
     // Nothing cancels these searches, so `search` can't fail.
-    let _ = search(indexes, query, limit, scorers, now(), &Cancel::never(), out);
+    let sources = Sources { indexes, history };
+    let _ = search(
+        &sources,
+        query,
+        limit,
+        scorers,
+        now(),
+        &Cancel::never(),
+        out,
+    );
     start.elapsed()
 }
 

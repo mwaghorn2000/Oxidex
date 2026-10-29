@@ -99,6 +99,18 @@ impl History {
             }
         }
         self.resolved.sort_unstable();
+        // `record_open` never makes two records for one path, but a file
+        // edited by hand might. One link per entry, so it's one hit.
+        self.resolved
+            .dedup_by_key(|&mut (index, id, _)| (index, id));
+    }
+
+    // Every resolved entry and its record, as (index number, entry ID,
+    // record), for search's history phase.
+    pub(crate) fn resolved(&self) -> impl Iterator<Item = (u32, u32, &Record)> {
+        self.resolved
+            .iter()
+            .map(|&(index, id, r)| (index, id, &self.records[r]))
     }
 
     // The record for entry `id` of index number `index`, as of the last
@@ -131,6 +143,14 @@ impl History {
             });
             return Ok(());
         };
+        // A last count in the future means the clock was wrong then (or is
+        // now). Left alone, it would block every later open until the real
+        // clock caught up, so move it to now. This open doesn't count, as if
+        // it fell within the gap.
+        if record.counted_at > now {
+            record.counted_at = now;
+            return Ok(());
+        }
         if now < record.counted_at.saturating_add(MIN_GAP) {
             return Ok(());
         }
@@ -238,6 +258,16 @@ mod tests {
         assert_close(record.frecency(NOW - DAY), 1.0);
     }
 
+    // A record counted with a clock a year fast must not freeze: later opens
+    // at the real time count again.
+    #[test]
+    fn open_after_a_future_count_unfreezes_the_record() {
+        let mut times = vec![NOW + 365 * DAY];
+        times.extend((0..30).map(|day| NOW + day * DAY));
+        let history = opened(&times);
+        assert!(history.records()[0].frecency(NOW + 29 * DAY) > 3.0);
+    }
+
     #[test]
     fn different_paths_get_separate_records() {
         let mut history = History::new();
@@ -342,6 +372,19 @@ mod tests {
         history.resolve(&[index]);
         history.resolve(&[]);
         assert!(history.find(0, a).is_none());
+    }
+
+    #[test]
+    fn duplicate_records_resolve_once() {
+        let (index, [a, ..]) = tree();
+        let json = r#"{"records": [
+            {"path": "/r/a.txt", "score": 1, "counted_at": 0},
+            {"path": "/r/a.txt", "score": 2, "counted_at": 0}
+        ]}"#;
+        let mut history = History::read_from(json.as_bytes()).unwrap();
+        history.resolve(&[index]);
+        assert_eq!(history.resolved().count(), 1);
+        assert!(history.find(0, a).is_some());
     }
 
     #[test]

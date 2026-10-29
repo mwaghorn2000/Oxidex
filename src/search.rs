@@ -16,9 +16,10 @@
 use std::cmp::Ordering;
 use std::sync::atomic::{self, AtomicU64};
 
+use crate::history::{History, Record};
 use crate::index::Index;
 pub use crate::matching::Tier;
-use crate::matching::{Query, Scratch, folders_match, match_name};
+use crate::matching::{Query, Scratch, folders_match, match_history, match_name};
 use crate::score::{Candidate, Scorer, total};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,14 @@ pub struct Hit {
     // How good the hit is within its tier: the total of every scorer's
     // points. Higher is better.
     pub score: i32,
+}
+
+// What search looks through. `history` must have been resolved against
+// exactly these `indexes` (see `History::resolve`): its links are entry IDs,
+// which only mean something for the walk that made them.
+pub struct Sources<'a> {
+    pub indexes: &'a [Index],
+    pub history: &'a History,
 }
 
 // Lets a newer query stop an older search. The UI bumps `latest` on every
@@ -74,7 +83,7 @@ impl<'a> Cancel<'a> {
 // within microseconds.
 const CANCEL_CHECK_EVERY: u32 = 4096;
 
-// Fills `out` with up to `limit` hits for `query` from all of `indexes`,
+// Fills `out` with up to `limit` hits for `query` from all of `sources`,
 // best first. Matching is case-insensitive. Hits within a tier are ranked by
 // `scorers` (usually `score::default_scorers()`), with `now` in seconds since
 // 1970. If `cancel` fires, stops early, clears `out` so a partial list is
@@ -84,7 +93,7 @@ const CANCEL_CHECK_EVERY: u32 = 4096;
 // matched against names as usual, and each part before it must match a
 // folder above the hit (see `folders_match`).
 pub fn search(
-    indexes: &[Index],
+    sources: &Sources,
     query: &str,
     limit: usize,
     scorers: &[Box<dyn Scorer>],
@@ -100,14 +109,73 @@ pub fn search(
     if query.text.is_empty() {
         return Ok(());
     }
+    let Sources { indexes, history } = *sources;
     let mut scratch = Scratch::default();
+
+    // The hit for entry `id` of index `number`, if its name matches. Both
+    // phases below use it, so history hits are matched and scored exactly
+    // like the rest. A closure because a function would need every argument
+    // of `search` again.
+    let mut hit_for = |number: u32, id: u32, record: Option<&Record>| -> Option<Hit> {
+        let index = indexes.get(number as usize)?;
+        let name = index.name(id)?;
+        let (tier, quality) = match record {
+            Some(record) => match_history(name, &query, record.frecency(now), &mut scratch)?,
+            None => match_name(name, &query, &mut scratch)?,
+        };
+        // Checked after the name matches, so path mode costs nothing for
+        // the names that don't.
+        if !query.folders.is_empty() && !folders_match(index, id, &query.folders) {
+            return None;
+        }
+        // Scored before the hit competes for a place in `out`. New signals
+        // go in score.rs: see the top of this file.
+        let candidate = Candidate {
+            index,
+            id,
+            tier,
+            quality,
+            history: record,
+            now,
+        };
+        Some(Hit {
+            index: number,
+            id,
+            tier,
+            score: total(scorers, &candidate),
+        })
+    };
 
     // Keep only the best `limit` hits instead of collecting and sorting every
     // match: a one-letter query matches most of the index. `worst` is the
     // position of the worst kept hit, once `out` is full. It's shared across
     // indexes, so they compete for the same `limit` places.
     let mut worst = None;
+
+    // Phase 1, history (RANKING.md, "Streaming"): the few files the user has
+    // opened, matched with `match_history`. They're small in number, so no
+    // cancellation check is needed.
+    for (number, id, record) in history.resolved() {
+        let mask = indexes
+            .get(number as usize)
+            .and_then(|i| i.masks().get(id as usize));
+        let Some(&mask) = mask else {
+            continue;
+        };
+        if !query.may_match_history(mask) {
+            continue;
+        }
+        if let Some(hit) = hit_for(number, id, Some(record)) {
+            keep(indexes, limit, out, &mut worst, hit);
+        }
+    }
+
+    // Phase 2, every entry of every index. `opened` walks phase 1's entries
+    // in the order this loop reaches them (`resolved` is sorted), so skipping
+    // them costs one comparison per entry rather than a lookup.
+    let mut opened = history.resolved().map(|(i, id, _)| (i, id)).peekable();
     for (number, index) in indexes.iter().enumerate() {
+        let number = number as u32;
         for (id, &mask) in index.masks().iter().enumerate() {
             let id = id as u32;
             // Checked at entry 0 too, so an already-stale search does no work.
@@ -119,33 +187,14 @@ pub fn search(
             if !query.may_match(mask) {
                 continue;
             }
-            let Some(name) = index.name(id) else {
-                continue;
-            };
-            let Some((tier, quality)) = match_name(name, &query, &mut scratch) else {
-                continue;
-            };
-            // Checked after the name matches, so path mode costs nothing for
-            // the names that don't.
-            if !query.folders.is_empty() && !folders_match(index, id, &query.folders) {
+            // Already scored in phase 1.
+            while opened.next_if(|&e| e < (number, id)).is_some() {}
+            if opened.peek() == Some(&(number, id)) {
                 continue;
             }
-            // Scored before the hit competes for a place in `out`. New signals
-            // go in score.rs: see the top of this file.
-            let candidate = Candidate {
-                index,
-                id,
-                tier,
-                quality,
-                now,
-            };
-            let hit = Hit {
-                index: number as u32,
-                id,
-                tier,
-                score: total(scorers, &candidate),
-            };
-            keep(indexes, limit, out, &mut worst, hit);
+            if let Some(hit) = hit_for(number, id, None) {
+                keep(indexes, limit, out, &mut worst, hit);
+            }
         }
     }
     out.sort_by(|a, b| compare(indexes, a, b));
@@ -211,6 +260,7 @@ fn find_worst(indexes: &[Index], out: &[Hit]) -> usize {
 mod tests {
     use super::*;
     use crate::score::{Quality, default_scorers};
+    use std::path::Path;
     use std::sync::atomic::AtomicU64;
 
     // A root folder with each name as a direct child file.
@@ -227,9 +277,19 @@ mod tests {
     // them. The one place tests call `search`, apart from tests of its other
     // parameters (scorers, cancellation).
     fn run(indexes: &[Index], query: &str, limit: usize, now: u64) -> Vec<Hit> {
+        run_with(indexes, &History::new(), query, limit, now)
+    }
+
+    fn run_with(
+        indexes: &[Index],
+        history: &History,
+        query: &str,
+        limit: usize,
+        now: u64,
+    ) -> Vec<Hit> {
         let mut out = Vec::new();
         search(
-            indexes,
+            &Sources { indexes, history },
             query,
             limit,
             &default_scorers(),
@@ -580,9 +640,13 @@ mod tests {
     fn hit_score_is_total_of_scorers() {
         let index = index_of(&["a.txt"]);
         let scorers: Vec<Box<dyn Scorer>> = vec![Box::new(Quality { weight: 2 })];
+        let history = History::new();
         let mut out = Vec::new();
         search(
-            &[index],
+            &Sources {
+                indexes: &[index],
+                history: &history,
+            },
             "a.txt",
             10,
             &scorers,
@@ -612,8 +676,12 @@ mod tests {
     fn search_that_is_not_cancelled_returns_ok() {
         let latest = AtomicU64::new(1);
         let mut out = Vec::new();
+        let history = History::new();
         let result = search(
-            &[index_of(&["a.txt"])],
+            &Sources {
+                indexes: &[index_of(&["a.txt"])],
+                history: &history,
+            },
             "a",
             10,
             &default_scorers(),
@@ -636,8 +704,12 @@ mod tests {
             tier: Tier::Exact,
             score: 0,
         }];
+        let history = History::new();
         let result = search(
-            &[index_of(&["a.txt"])],
+            &Sources {
+                indexes: &[index_of(&["a.txt"])],
+                history: &history,
+            },
             "a",
             10,
             &default_scorers(),
@@ -657,5 +729,166 @@ mod tests {
         index.push("myproj.txt", root, false, 0, 0).unwrap();
         let hits = results(&index, "myproj", 10);
         assert_eq!(hits[0], ("/home/me/myproj".to_string(), Tier::Exact));
+    }
+
+    // A history with `paths` opened once each, resolved against `indexes`.
+    fn history_of(indexes: &[Index], paths: &[&str]) -> History {
+        let mut history = History::new();
+        for path in paths {
+            history.record_open(Path::new(path), 0).unwrap();
+        }
+        history.resolve(indexes);
+        history
+    }
+
+    // Phase 1 finds it and phase 2 must skip it.
+    #[test]
+    fn history_hit_appears_once() {
+        let indexes = [index_of(&["a.txt", "notes.md"])];
+        let history = history_of(&indexes, &["root/a.txt"]);
+        let hits = run_with(&indexes, &history, "a.txt", 10, 0);
+        let ids: Vec<u32> = hits.iter().map(|h| h.id).collect();
+        assert_eq!(ids, [1]);
+    }
+
+    // Files opened once each are well below the tier-jump score, and these
+    // queries aren't typos of a name being typed, so history only changes
+    // scores here: the same hits, in the same tiers.
+    #[test]
+    fn history_keeps_hits_and_tiers() {
+        let indexes = [tree()];
+        let opened = [
+            "root/docs",
+            "root/docs/readme.md",
+            "root/docs/old/notes.txt",
+            "root/src/readme.md",
+            "root/src/docs",
+        ];
+        let history = history_of(&indexes, &opened);
+        assert_eq!(history.resolved().count(), opened.len());
+        let tiers = |hits: Vec<Hit>| {
+            let mut tiers: Vec<(u32, Tier)> = hits.iter().map(|h| (h.id, h.tier)).collect();
+            tiers.sort();
+            tiers
+        };
+        for query in ["readme", "docs", "rdm", "raedme", "docs/readme", "r"] {
+            let with = run_with(&indexes, &history, query, 10, 0);
+            assert_eq!(tiers(with), tiers(run(&indexes, query, 10, 0)), "{query}");
+        }
+    }
+
+    // Both are exact matches. Without history the shallower one would win
+    // the tiebreak.
+    #[test]
+    fn opened_file_ranks_higher_on_equal_match() {
+        let mut index = Index::new();
+        let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
+        let docs = index.push("docs", root, true, 0, 0).unwrap();
+        let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
+        let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
+        let indexes = [index];
+        let ids = |hits: Vec<Hit>| hits.iter().map(|h| h.id).collect::<Vec<u32>>();
+        assert_eq!(ids(run(&indexes, "a.txt", 10, 0)), [shallow, deep]);
+        let history = history_of(&indexes, &["root/docs/a.txt"]);
+        assert_eq!(
+            ids(run_with(&indexes, &history, "a.txt", 10, 0)),
+            [deep, shallow]
+        );
+    }
+
+    #[test]
+    fn history_hits_obey_path_mode() {
+        let indexes = [tree()];
+        let history = history_of(&indexes, &["root/docs/readme.md", "root/src/readme.md"]);
+        let hits = run_with(&indexes, &history, "docs/readme", 10, 0);
+        let paths: Vec<_> = hits
+            .iter()
+            .map(|h| indexes[0].full_path(h.id).unwrap())
+            .collect();
+        assert_eq!(paths, [Path::new("root").join("docs").join("readme.md")]);
+    }
+
+    // Resolved as index 1, which doesn't exist here: no hit, and no panic.
+    #[test]
+    fn history_resolved_against_other_indexes_is_ignored() {
+        let other = [index_of(&["x.txt"]), index_of(&["a.txt"])];
+        let history = history_of(&other, &["root/a.txt"]);
+        let indexes = [index_of(&["notes.md"])];
+        assert!(run_with(&indexes, &history, "a.txt", 10, 0).is_empty());
+    }
+
+    // `path` opened with history score `score` as of time 0, resolved
+    // against `indexes`.
+    fn history_scored(indexes: &[Index], path: &str, score: f64) -> History {
+        let json =
+            format!(r#"{{"records": [{{"path": "{path}", "score": {score}, "counted_at": 0}}]}}"#);
+        let mut history = History::read_from(json.as_bytes()).unwrap();
+        history.resolve(indexes);
+        history
+    }
+
+    fn named(indexes: &[Index], hits: &[Hit]) -> Vec<(String, Tier)> {
+        hits.iter()
+            .map(|h| (indexes[0].display_name(h.id).unwrap().to_string(), h.tier))
+            .collect()
+    }
+
+    // RANKING.md's example: a typo of a daily-opened app beats an exact
+    // match nobody opens.
+    #[test]
+    fn daily_file_jumps_above_exact_match() {
+        let indexes = [index_of(&["slark.txt", "slack.exe"])];
+        let before = named(&indexes, &run(&indexes, "slark", 10, 0));
+        assert_eq!(
+            before,
+            [
+                ("slark.txt".to_string(), Tier::Exact),
+                ("slack.exe".to_string(), Tier::Levenshtein),
+            ]
+        );
+        let history = history_scored(&indexes, "root/slack.exe", 5.0);
+        let after = named(&indexes, &run_with(&indexes, &history, "slark", 10, 0));
+        assert_eq!(
+            after,
+            [
+                ("slack.exe".to_string(), Tier::Exact),
+                ("slark.txt".to_string(), Tier::Exact),
+            ]
+        );
+    }
+
+    #[test]
+    fn rarely_opened_file_does_not_jump() {
+        let indexes = [index_of(&["slark.txt", "slack.exe"])];
+        let history = history_scored(&indexes, "root/slack.exe", 1.0);
+        let hits = named(&indexes, &run_with(&indexes, &history, "slark", 10, 0));
+        assert_eq!(hits[0], ("slark.txt".to_string(), Tier::Exact));
+    }
+
+    // Unopened names get no typos while typing; opened ones do.
+    #[test]
+    fn only_opened_files_match_typos_while_typing() {
+        let indexes = [index_of(&["slack.exe", "slick.txt"])];
+        assert!(run(&indexes, "slar", 10, 0).is_empty());
+        let history = history_scored(&indexes, "root/slack.exe", 1.0);
+        let hits = named(&indexes, &run_with(&indexes, &history, "slar", 10, 0));
+        assert_eq!(hits, [("slack.exe".to_string(), Tier::Levenshtein)]);
+    }
+
+    // The opened one was pushed second, so it only wins if opening it raised
+    // its score.
+    #[test]
+    fn opened_recent_file_ranks_above_unopened_recent_file() {
+        const NOW: u64 = 1_000 * 86_400;
+        let mut index = Index::new();
+        let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
+        index.push("a.txt", root, false, 0, NOW).unwrap();
+        let opened = index.push("b.txt", root, false, 0, NOW).unwrap();
+        let indexes = [index];
+        let mut history = History::new();
+        history.record_open(Path::new("root/b.txt"), NOW).unwrap();
+        history.resolve(&indexes);
+        let hits = run_with(&indexes, &history, "txt", 10, NOW);
+        assert_eq!(hits[0].id, opened);
     }
 }

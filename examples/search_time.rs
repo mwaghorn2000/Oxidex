@@ -42,6 +42,11 @@ fn main() {
 
         let mut hits = Vec::new();
         let scorers = oxidex::score::default_scorers();
+        let history = oxidex::history::History::new();
+        let sources = oxidex::search::Sources {
+            indexes: std::slice::from_ref(&index),
+            history: &history,
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -49,15 +54,8 @@ fn main() {
         for _ in 0..RUNS {
             let start = Instant::now();
             let cancel = oxidex::search::Cancel::never();
-            let _ = oxidex::search::search(
-                std::slice::from_ref(&index),
-                &query,
-                LIMIT,
-                &scorers,
-                now,
-                &cancel,
-                &mut hits,
-            );
+            let _ =
+                oxidex::search::search(&sources, &query, LIMIT, &scorers, now, &cancel, &mut hits);
             times.push(start.elapsed());
         }
         println!(
