@@ -6,7 +6,7 @@
 // Adding a tier: see the overview at the top of search.rs. `may_match` runs
 // first, so anything a new tier matches must pass it, or search skips the
 // name before `match_name` sees it.
-use crate::index::{Index, char_mask};
+use crate::index::{Index, char_mask, fold_case};
 
 // Ordered best first, so sorting by tier puts exact matches on top. Tiers
 // are strict: a hit in a better tier always ranks above one in a worse tier,
@@ -56,7 +56,7 @@ pub(crate) struct Query {
 
 impl Query {
     pub(crate) fn new(query: &str) -> Query {
-        let lowercase = query.to_lowercase();
+        let lowercase = fold_case(query);
         let mut parts: Vec<&str> = lowercase.split(['/', '\\']).collect();
         let text = parts.pop().unwrap_or_default().to_string();
         // Empty parts ("/notes", "docs//notes") would match any folder, so

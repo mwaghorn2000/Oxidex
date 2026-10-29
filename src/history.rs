@@ -13,7 +13,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::index::Index;
+use crate::index::{Index, fold_case};
 
 const HOUR: u64 = 3_600;
 const DAY: u64 = 86_400;
@@ -81,7 +81,7 @@ impl History {
             let Some(name) = record.path().file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            by_name.entry(name.to_lowercase()).or_default().push(number);
+            by_name.entry(fold_case(name)).or_default().push(number);
         }
         for (number, index) in indexes.iter().enumerate() {
             for id in 0..index.len() as u32 {

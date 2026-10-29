@@ -46,6 +46,18 @@ pub fn char_mask(lowercase: &str) -> u64 {
     mask
 }
 
+// Lowercases `text` the way names and queries are both matched. Plain
+// `to_lowercase` turns a Greek capital sigma at the end of a word into final
+// 'ς' and anywhere else into 'σ', so the query "ΟΔΟΣ" wouldn't be a prefix of
+// "ΟΔΟΣΤΡΩΜΑ". Both forms are 2 bytes, so folding keeps byte offsets.
+pub(crate) fn fold_case(text: &str) -> String {
+    let lowercase = text.to_lowercase();
+    if lowercase.contains('ς') {
+        return lowercase.replace('ς', "σ");
+    }
+    lowercase
+}
+
 // Returned by `push` when a name is longer than `u16::MAX` bytes.
 #[derive(Debug, PartialEq, Eq)]
 pub struct NameTooLong;
@@ -100,7 +112,7 @@ impl Index {
         size: u64,
         modified: u64,
     ) -> Result<u32, NameTooLong> {
-        let lowercase = name.to_lowercase();
+        let lowercase = fold_case(name);
         if lowercase.len() > u16::MAX as usize || display.len() > u16::MAX as usize {
             return Err(NameTooLong);
         }
@@ -257,6 +269,15 @@ mod tests {
         let mut index = Index::new();
         let id = index.push("ReadMe.MD", NO_PARENT, false, 0, 0).unwrap();
         assert_eq!(index.name(id), Some("readme.md"));
+    }
+
+    #[test]
+    fn final_sigma_folds_like_any_sigma() {
+        let mut index = Index::new();
+        let id = index.push("ΟΔΟΣ.txt", NO_PARENT, false, 0, 0).unwrap();
+        assert_eq!(index.name(id), Some("οδοσ.txt"));
+        assert_eq!(index.display_name(id), Some("ΟΔΟΣ.txt"));
+        assert_eq!(fold_case("ΟΔΟΣ"), fold_case("οδος"));
     }
 
     #[test]

@@ -658,4 +658,19 @@ mod tests {
         let hits = results(&index, "myproj", 10);
         assert_eq!(hits[0], ("/home/me/myproj".to_string(), Tier::Exact));
     }
+
+    // A query ending in 'Σ' lowercases to final 'ς', but the same letter in
+    // the middle of a name lowercases to 'σ'.
+    #[test]
+    fn final_sigma_query_matches_exact_and_prefix() {
+        let index = index_of(&["ΟΔΟΣ.txt", "ΟΔΟΣΤΡΩΜΑ.txt"]);
+        let hits = results(&index, "ΟΔΟΣ", 10);
+        assert_eq!(
+            hits,
+            [
+                ("ΟΔΟΣ.txt".to_string(), Tier::Exact),
+                ("ΟΔΟΣΤΡΩΜΑ.txt".to_string(), Tier::Prefix),
+            ]
+        );
+    }
 }
