@@ -1,7 +1,8 @@
 // Command-line search, for trying search on real folders:
 // `cargo run --release -- <folder>...`
 // Walks each folder once. In a terminal, results update live as you type,
-// Up and Down move the highlight, and Esc or Ctrl-C quits. With piped input, reads one query per line instead,
+// Up and Down move the highlight, Enter opens it and quits, and Esc or
+// Ctrl-C quits. With piped input, reads one query per line instead,
 // so it can be scripted.
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::num::NonZeroUsize;
@@ -15,6 +16,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, queue};
+
+mod open;
 
 use oxidex::history::History;
 use oxidex::index::Index;
@@ -35,7 +38,7 @@ fn main() {
         return;
     }
     if io::stdin().is_terminal() {
-        if let Err(e) = live(&indexes) {
+        if let Err(e) = live(&indexes).map(|_| ()) {
             eprintln!("terminal error: {e}");
         }
     } else {
@@ -101,8 +104,8 @@ fn lines(indexes: &[Arc<Index>]) {
 }
 
 // Live mode: the query on the top line, results redrawn under it on every
-// key press.
-fn live(indexes: &[Arc<Index>]) -> io::Result<()> {
+// key press. Returns the path opened, if any.
+fn live(indexes: &[Arc<Index>]) -> io::Result<Option<PathBuf>> {
     let _screen = Screen::enter()?;
     let scorers = default_scorers();
     // Empty: the CLI doesn't record opens yet.
@@ -112,14 +115,30 @@ fn live(indexes: &[Arc<Index>]) -> io::Result<()> {
     let mut elapsed = Duration::ZERO;
     // Row of the highlighted result in `out`.
     let mut selected = 0;
+    // Why the last open failed, shown until the next key.
+    let mut error = None;
     loop {
-        draw(indexes, &query, &out, selected, elapsed)?;
+        draw(indexes, &query, &out, selected, elapsed, error.take())?;
         match event::read()? {
             // Windows also reports key releases; only act on presses.
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Esc => return Ok(()),
+                KeyCode::Esc => return Ok(None),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(());
+                    return Ok(None);
+                }
+                KeyCode::Enter => {
+                    let Some(hit) = out.get(selected) else {
+                        continue;
+                    };
+                    let Some(path) = indexes[hit.index as usize].full_path(hit.id) else {
+                        continue;
+                    };
+                    // Like a launcher popup: done once something is open.
+                    match open::open(&path) {
+                        Ok(()) => return Ok(Some(path)),
+                        Err(e) => error = Some(format!("Couldn't open {}: {e}", path.display())),
+                    }
+                    continue;
                 }
                 KeyCode::Up => {
                     selected = move_selection(selected, false, out.len());
@@ -193,6 +212,7 @@ fn draw(
     hits: &[Hit],
     selected: usize,
     elapsed: Duration,
+    error: Option<String>,
 ) -> io::Result<()> {
     let (cols, rows) = terminal::size()?;
     let width = usize::from(cols);
@@ -235,8 +255,10 @@ fn draw(
         )?;
     }
 
-    let status = if query.is_empty() {
-        "Type to search. Up and Down select. Esc quits.".to_string()
+    let status = if let Some(error) = error {
+        error
+    } else if query.is_empty() {
+        "Type to search. Up and Down select, Enter opens. Esc quits.".to_string()
     } else {
         format!("{} results in {elapsed:.1?}", hits.len())
     };
