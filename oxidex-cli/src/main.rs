@@ -6,6 +6,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,7 +45,7 @@ fn main() {
 
 // Walks each folder into its own index. Folders inside another one are left
 // out, so no file shows up twice, and so are folders that can't be read.
-fn index_all(folders: &[String]) -> Vec<Index> {
+fn index_all(folders: &[String]) -> Vec<Arc<Index>> {
     let workers = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
     let roots: Vec<PathBuf> = folders.iter().map(PathBuf::from).collect();
     let mut indexes = Vec::new();
@@ -55,7 +56,7 @@ fn index_all(folders: &[String]) -> Vec<Index> {
             Ok(walk) => {
                 let entries = walk.index.len();
                 eprintln!("{folder}: {entries} entries in {:.0?}", start.elapsed());
-                indexes.push(walk.index);
+                indexes.push(Arc::new(walk.index));
             }
             Err(e) => eprintln!("{folder}: {e}"),
         }
@@ -66,7 +67,7 @@ fn index_all(folders: &[String]) -> Vec<Index> {
 // Line mode: one query per line, results printed below it. Line mode only
 // runs with piped input, so there's no prompt: nobody is there to see it,
 // and it would end up mixed into the output.
-fn lines(indexes: &[Index]) {
+fn lines(indexes: &[Arc<Index>]) {
     let scorers = default_scorers();
     // Empty: the CLI doesn't record opens yet.
     let history = History::new();
@@ -101,7 +102,7 @@ fn lines(indexes: &[Index]) {
 
 // Live mode: the query on the top line, results redrawn under it on every
 // key press.
-fn live(indexes: &[Index]) -> io::Result<()> {
+fn live(indexes: &[Arc<Index>]) -> io::Result<()> {
     let _screen = Screen::enter()?;
     let scorers = default_scorers();
     // Empty: the CLI doesn't record opens yet.
@@ -154,7 +155,7 @@ impl Drop for Screen {
     }
 }
 
-fn draw(indexes: &[Index], query: &str, hits: &[Hit], elapsed: Duration) -> io::Result<()> {
+fn draw(indexes: &[Arc<Index>], query: &str, hits: &[Hit], elapsed: Duration) -> io::Result<()> {
     let (cols, rows) = terminal::size()?;
     let width = usize::from(cols);
     let mut stdout = io::stdout();
@@ -233,7 +234,7 @@ fn fit(folder: &str, name: &str, width: usize) -> (String, String) {
 }
 
 fn timed_search(
-    indexes: &[Index],
+    indexes: &[Arc<Index>],
     history: &History,
     query: &str,
     limit: usize,

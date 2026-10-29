@@ -14,6 +14,7 @@
 // 3. Tiebreaks (`compare`): only for hits with equal tier and score, so the
 //    order never shuffles between searches. Not a place for ranking signals.
 use std::cmp::Ordering;
+use std::sync::Arc;
 use std::sync::atomic::{self, AtomicU64};
 
 use crate::history::{History, Record};
@@ -38,7 +39,7 @@ pub struct Hit {
 // exactly these `indexes` (see `History::resolve`): its links are entry IDs,
 // which only mean something for the walk that made them.
 pub struct Sources<'a> {
-    pub indexes: &'a [Index],
+    pub indexes: &'a [Arc<Index>],
     pub history: &'a History,
 }
 
@@ -115,9 +116,10 @@ pub fn search(
     // The hit for entry `id` of index `number`, if its name matches. Both
     // phases below use it, so history hits are matched and scored exactly
     // like the rest. A closure because a function would need every argument
-    // of `search` again.
-    let mut hit_for = |number: u32, id: u32, record: Option<&Record>| -> Option<Hit> {
-        let index = indexes.get(number as usize)?;
+    // of `search` again. Callers pass `index` in rather than it being looked
+    // up here: going through the `Arc` again for every matching name made
+    // one-letter queries about 5% slower.
+    let mut hit_for = |number: u32, index: &Index, id, record: Option<&Record>| -> Option<Hit> {
         let name = index.name(id)?;
         let (tier, quality) = match record {
             Some(record) => match_history(name, &query, record.frecency(now), &mut scratch)?,
@@ -156,16 +158,16 @@ pub fn search(
     // opened, matched with `match_history`. They're small in number, so no
     // cancellation check is needed.
     for (number, id, record) in history.resolved() {
-        let mask = indexes
-            .get(number as usize)
-            .and_then(|i| i.masks().get(id as usize));
-        let Some(&mask) = mask else {
+        let Some(index) = indexes.get(number as usize) else {
+            continue;
+        };
+        let Some(&mask) = index.masks().get(id as usize) else {
             continue;
         };
         if !query.may_match_history(mask) {
             continue;
         }
-        if let Some(hit) = hit_for(number, id, Some(record)) {
+        if let Some(hit) = hit_for(number, index, id, Some(record)) {
             keep(indexes, limit, out, &mut worst, hit);
         }
     }
@@ -192,7 +194,7 @@ pub fn search(
             if opened.peek() == Some(&(number, id)) {
                 continue;
             }
-            if let Some(hit) = hit_for(number, id, None) {
+            if let Some(hit) = hit_for(number, index, id, None) {
                 keep(indexes, limit, out, &mut worst, hit);
             }
         }
@@ -202,7 +204,13 @@ pub fn search(
 }
 
 // Adds `hit` to `out` if there's room or it beats the worst kept hit.
-fn keep(indexes: &[Index], limit: usize, out: &mut Vec<Hit>, worst: &mut Option<usize>, hit: Hit) {
+fn keep(
+    indexes: &[Arc<Index>],
+    limit: usize,
+    out: &mut Vec<Hit>,
+    worst: &mut Option<usize>,
+    hit: Hit,
+) {
     if out.len() < limit {
         out.push(hit);
         if out.len() == limit {
@@ -220,7 +228,7 @@ fn keep(indexes: &[Index], limit: usize, out: &mut Vec<Hit>, worst: &mut Option<
 // then shallower path, then earlier index, then earlier entry. Name length
 // and depth are only looked up on a tie, so the common case stays cheap.
 // Ranking signals belong in `Hit::score`, not here: see the top of this file.
-fn compare(indexes: &[Index], a: &Hit, b: &Hit) -> Ordering {
+fn compare(indexes: &[Arc<Index>], a: &Hit, b: &Hit) -> Ordering {
     a.tier
         .cmp(&b.tier)
         .then(b.score.cmp(&a.score))
@@ -231,13 +239,13 @@ fn compare(indexes: &[Index], a: &Hit, b: &Hit) -> Ordering {
 }
 
 // A missing entry sorts last rather than panicking.
-fn name_len(indexes: &[Index], hit: &Hit) -> usize {
+fn name_len(indexes: &[Arc<Index>], hit: &Hit) -> usize {
     let name = indexes.get(hit.index as usize).and_then(|i| i.name(hit.id));
     name.map_or(usize::MAX, str::len)
 }
 
 // An entry whose parents form a cycle has no depth, so it sorts last.
-fn depth(indexes: &[Index], hit: &Hit) -> u32 {
+fn depth(indexes: &[Arc<Index>], hit: &Hit) -> u32 {
     let depth = indexes
         .get(hit.index as usize)
         .and_then(|i| i.depth(hit.id));
@@ -246,7 +254,7 @@ fn depth(indexes: &[Index], hit: &Hit) -> u32 {
 
 // Position of the worst hit in `out`. A linear scan is fine: `out` holds
 // only `limit` hits, and this only runs when a better hit replaces one.
-fn find_worst(indexes: &[Index], out: &[Hit]) -> usize {
+fn find_worst(indexes: &[Arc<Index>], out: &[Hit]) -> usize {
     let mut worst = 0;
     for i in 1..out.len() {
         if compare(indexes, &out[i], &out[worst]) == Ordering::Greater {
@@ -264,24 +272,24 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     // A root folder with each name as a direct child file.
-    fn index_of(names: &[&str]) -> Index {
+    fn index_of(names: &[&str]) -> Arc<Index> {
         let mut index = Index::new();
         let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
         for name in names {
             index.push(name, root, false, 0, 0).unwrap();
         }
-        index
+        Arc::new(index)
     }
 
     // Hits for `query` with the default scorers, as the frontend would get
     // them. The one place tests call `search`, apart from tests of its other
     // parameters (scorers, cancellation).
-    fn run(indexes: &[Index], query: &str, limit: usize, now: u64) -> Vec<Hit> {
+    fn run(indexes: &[Arc<Index>], query: &str, limit: usize, now: u64) -> Vec<Hit> {
         run_with(indexes, &History::new(), query, limit, now)
     }
 
     fn run_with(
-        indexes: &[Index],
+        indexes: &[Arc<Index>],
         history: &History,
         query: &str,
         limit: usize,
@@ -302,7 +310,7 @@ mod tests {
     }
 
     // Display name and tier of each hit, in result order.
-    fn results(index: &Index, query: &str, limit: usize) -> Vec<(String, Tier)> {
+    fn results(index: &Arc<Index>, query: &str, limit: usize) -> Vec<(String, Tier)> {
         let out = run(std::slice::from_ref(index), query, limit, 0);
         out.iter()
             .map(|hit| (index.display_name(hit.id).unwrap().to_string(), hit.tier))
@@ -339,7 +347,7 @@ mod tests {
         let mut index = Index::new();
         let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
         index.push("docs", root, true, 0, 0).unwrap();
-        let hits = results(&index, "docs", 10);
+        let hits = results(&Arc::new(index), "docs", 10);
         assert_eq!(hits, vec![("docs".to_string(), Tier::Exact)]);
     }
 
@@ -382,7 +390,7 @@ mod tests {
         assert_eq!(names(&index, "ab", 10), ["ab", "abc"]);
     }
 
-    fn names(index: &Index, query: &str, limit: usize) -> Vec<String> {
+    fn names(index: &Arc<Index>, query: &str, limit: usize) -> Vec<String> {
         results(index, query, limit)
             .into_iter()
             .map(|h| h.0)
@@ -402,7 +410,7 @@ mod tests {
         let docs = index.push("docs", root, true, 0, 0).unwrap();
         let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
         let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
-        let out = run(&[index], "a.txt", 10, 0);
+        let out = run(&[Arc::new(index)], "a.txt", 10, 0);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [shallow, deep]);
     }
@@ -413,7 +421,7 @@ mod tests {
         let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
         let first = index.push("a.txt", root, false, 0, 0).unwrap();
         let second = index.push("a.txt", root, false, 0, 0).unwrap();
-        let out = run(&[index], "a.txt", 10, 0);
+        let out = run(&[Arc::new(index)], "a.txt", 10, 0);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [first, second]);
     }
@@ -427,7 +435,7 @@ mod tests {
     }
 
     // Index number and display name of each hit, in result order.
-    fn hits_across(indexes: &[Index], query: &str, limit: usize) -> Vec<(u32, String)> {
+    fn hits_across(indexes: &[Arc<Index>], query: &str, limit: usize) -> Vec<(u32, String)> {
         let out = run(indexes, query, limit, 0);
         out.iter()
             .map(|hit| {
@@ -514,7 +522,7 @@ mod tests {
     // root/
     //   docs/readme.md, docs/old/notes.txt
     //   src/readme.md, src/docs/
-    fn tree() -> Index {
+    fn tree() -> Arc<Index> {
         let mut index = Index::new();
         let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
         let docs = index.push("docs", root, true, 0, 0).unwrap();
@@ -524,11 +532,11 @@ mod tests {
         let src = index.push("src", root, true, 0, 0).unwrap();
         index.push("readme.md", src, false, 0, 0).unwrap();
         index.push("docs", src, true, 0, 0).unwrap();
-        index
+        Arc::new(index)
     }
 
     // Full path of each hit, in result order.
-    fn paths(index: Index, query: &str) -> Vec<String> {
+    fn paths(index: Arc<Index>, query: &str) -> Vec<String> {
         let indexes = [index];
         let out = run(&indexes, query, 10, 0);
         out.iter()
@@ -614,7 +622,7 @@ mod tests {
             .push("a.txt", root, false, 0, NOW - 365 * DAY)
             .unwrap();
         let new = index.push("a.txt", root, false, 0, NOW).unwrap();
-        let out = run(&[index], "a.txt", 10, NOW);
+        let out = run(&[Arc::new(index)], "a.txt", 10, NOW);
         let ids: Vec<u32> = out.iter().map(|h| h.id).collect();
         assert_eq!(ids, [new, old]);
     }
@@ -631,7 +639,7 @@ mod tests {
         index
             .push("readme_old_backup", root, false, 0, NOW)
             .unwrap();
-        let out = run(&[index], "read", 10, NOW);
+        let out = run(&[Arc::new(index)], "read", 10, NOW);
         assert_eq!(out[0].id, 1);
     }
 
@@ -727,7 +735,7 @@ mod tests {
         let mut index = Index::new();
         let root = index.push_root("/home/me/myproj", true, 0, 0).unwrap();
         index.push("myproj.txt", root, false, 0, 0).unwrap();
-        let hits = results(&index, "myproj", 10);
+        let hits = results(&Arc::new(index), "myproj", 10);
         assert_eq!(hits[0], ("/home/me/myproj".to_string(), Tier::Exact));
     }
 
@@ -747,7 +755,7 @@ mod tests {
     }
 
     // A history with `paths` opened once each, resolved against `indexes`.
-    fn history_of(indexes: &[Index], paths: &[&str]) -> History {
+    fn history_of(indexes: &[Arc<Index>], paths: &[&str]) -> History {
         let mut history = History::new();
         for path in paths {
             history.record_open(Path::new(path), 0).unwrap();
@@ -801,7 +809,7 @@ mod tests {
         let docs = index.push("docs", root, true, 0, 0).unwrap();
         let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
         let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
-        let indexes = [index];
+        let indexes = [Arc::new(index)];
         let ids = |hits: Vec<Hit>| hits.iter().map(|h| h.id).collect::<Vec<u32>>();
         assert_eq!(ids(run(&indexes, "a.txt", 10, 0)), [shallow, deep]);
         let history = history_of(&indexes, &["root/docs/a.txt"]);
@@ -834,7 +842,7 @@ mod tests {
 
     // `path` opened with history score `score` as of time 0, resolved
     // against `indexes`.
-    fn history_scored(indexes: &[Index], path: &str, score: f64) -> History {
+    fn history_scored(indexes: &[Arc<Index>], path: &str, score: f64) -> History {
         let json =
             format!(r#"{{"records": [{{"path": "{path}", "score": {score}, "counted_at": 0}}]}}"#);
         let mut history = History::read_from(json.as_bytes()).unwrap();
@@ -842,7 +850,7 @@ mod tests {
         history
     }
 
-    fn named(indexes: &[Index], hits: &[Hit]) -> Vec<(String, Tier)> {
+    fn named(indexes: &[Arc<Index>], hits: &[Hit]) -> Vec<(String, Tier)> {
         hits.iter()
             .map(|h| (indexes[0].display_name(h.id).unwrap().to_string(), h.tier))
             .collect()
@@ -878,7 +886,7 @@ mod tests {
         let root = index.push_root("/home/Me/Projects", true, 0, 0).unwrap();
         let src = index.push("src", root, true, 0, 0).unwrap();
         index.push("search.rs", src, false, 0, 0).unwrap();
-        let indexes = [index];
+        let indexes = [Arc::new(index)];
         run(&indexes, query, 10, 0)
             .iter()
             .map(|h| indexes[0].full_path(h.id).unwrap())
@@ -932,7 +940,7 @@ mod tests {
         let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
         index.push("a.txt", root, false, 0, NOW).unwrap();
         let opened = index.push("b.txt", root, false, 0, NOW).unwrap();
-        let indexes = [index];
+        let indexes = [Arc::new(index)];
         let mut history = History::new();
         history.record_open(Path::new("root/b.txt"), NOW).unwrap();
         history.resolve(&indexes);

@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +75,7 @@ impl History {
     // and only entries named like a record build a full path to compare.
     // Records whose file isn't in any index stay unresolved. They're kept,
     // and resolve again if the file comes back.
-    pub fn resolve(&mut self, indexes: &[Index]) {
+    pub fn resolve(&mut self, indexes: &[Arc<Index>]) {
         self.resolved.clear();
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
         for (number, record) in self.records.iter().enumerate() {
@@ -202,14 +203,14 @@ mod tests {
 
     // root/a.txt, root/Docs/a.txt and root/Docs/ReadMe.md, with root at
     // `/r`. Returns the index and the IDs of the three files.
-    fn tree() -> (Index, [u32; 3]) {
+    fn tree() -> (Arc<Index>, [u32; 3]) {
         let mut index = Index::new();
         let root = index.push_root("/r", true, 0, 0).unwrap();
         let a = index.push("a.txt", root, false, 0, 0).unwrap();
         let docs = index.push("Docs", root, true, 0, 0).unwrap();
         let docs_a = index.push("a.txt", docs, false, 0, 0).unwrap();
         let readme = index.push("ReadMe.md", docs, false, 0, 0).unwrap();
-        (index, [a, docs_a, readme])
+        (Arc::new(index), [a, docs_a, readme])
     }
 
     fn history_of(paths: &[&str]) -> History {
@@ -358,7 +359,7 @@ mod tests {
         let b = other.push("b.txt", root, false, 0, 0).unwrap();
         let (index, [a, ..]) = tree();
         let mut history = history_of(&["/s/b.txt", "/r/a.txt"]);
-        history.resolve(&[index, other]);
+        history.resolve(&[index, Arc::new(other)]);
         assert_eq!(history.find(0, a).unwrap().path(), Path::new("/r/a.txt"));
         assert_eq!(history.find(1, b).unwrap().path(), Path::new("/s/b.txt"));
         assert!(history.find(1, a).is_none());
