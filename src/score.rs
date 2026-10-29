@@ -49,8 +49,8 @@ impl Scorer for Quality {
 }
 
 // Newer files rank higher: a file modified just now gets `max_boost`, and the
-// boost halves every `half_life_days`. Only for files never opened through
-// Oxidex: once a file has history, `Frecency` says more about it.
+// boost halves every `half_life_days`. Applies to opened files too, with
+// `Frecency` added on top, so opening a file can only raise its score.
 pub struct Modified {
     pub max_boost: i32,
     pub half_life_days: u64,
@@ -62,9 +62,6 @@ impl Scorer for Modified {
     }
 
     fn score(&self, c: &Candidate) -> i32 {
-        if c.history.is_some() {
-            return 0;
-        }
         let Some(modified) = c.index.modified(c.id) else {
             return 0;
         };
@@ -277,20 +274,21 @@ mod tests {
         assert_eq!(scorer.score(&candidate(&index, 0)), 0);
     }
 
-    // Modified time is the fallback for files never opened through Oxidex.
+    // Opening a recently modified file must not trade its modified boost
+    // for a smaller frecency one, even once the open has decayed.
     #[test]
-    fn modified_gives_nothing_to_opened_files() {
+    fn opening_a_file_never_lowers_its_score() {
+        let scorers = default_scorers();
         let index = index_modified_at(NOW);
-        let record = record(1.0);
-        let c = Candidate {
-            history: Some(&record),
-            ..candidate(&index, 0)
-        };
-        let scorer = Modified {
-            max_boost: 100,
-            half_life_days: 30,
-        };
-        assert_eq!(scorer.score(&c), 0);
+        let unopened = total(&scorers, &candidate(&index, 800));
+        for open in [record(1.0), record(0.01)] {
+            let c = Candidate {
+                history: Some(&open),
+                ..candidate(&index, 800)
+            };
+            let opened = total(&scorers, &c);
+            assert!(opened >= unopened, "{opened} vs {unopened}");
+        }
     }
 
     // On the default scale, a clearly better match beats a file opened often.

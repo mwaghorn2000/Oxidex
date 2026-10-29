@@ -874,4 +874,21 @@ mod tests {
         let hits = named(&indexes, &run_with(&indexes, &history, "slar", 10, 0));
         assert_eq!(hits, [("slack.exe".to_string(), Tier::Levenshtein)]);
     }
+
+    // The opened one was pushed second, so it only wins if opening it raised
+    // its score.
+    #[test]
+    fn opened_recent_file_ranks_above_unopened_recent_file() {
+        const NOW: u64 = 1_000 * 86_400;
+        let mut index = Index::new();
+        let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
+        index.push("a.txt", root, false, 0, NOW).unwrap();
+        let opened = index.push("b.txt", root, false, 0, NOW).unwrap();
+        let indexes = [index];
+        let mut history = History::new();
+        history.record_open(Path::new("root/b.txt"), NOW).unwrap();
+        history.resolve(&indexes);
+        let hits = run_with(&indexes, &history, "txt", 10, NOW);
+        assert_eq!(hits[0].id, opened);
+    }
 }
