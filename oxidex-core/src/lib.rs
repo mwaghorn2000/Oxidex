@@ -1,3 +1,5 @@
+//! Oxidex's search engine: walk folders into an `Index`, then search
+//! the names in it. No UI; the frontends build on this.
 pub mod history;
 pub mod index;
 mod matching;

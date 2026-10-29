@@ -1,6 +1,9 @@
+//! The index of one search folder: every name under it, packed into
+//! shared buffers.
 /// The parent of a root entry, which has none.
 pub const NO_PARENT: u32 = u32::MAX;
 
+/// The names under one search folder, searched by `search::search`.
 pub struct Index {
     // Lowercased names, used for matching.
     names: String,
@@ -14,6 +17,7 @@ pub struct Index {
     masks: Vec<u64>,
 }
 
+/// One file or folder in an `Index`.
 #[allow(dead_code)]
 pub struct Entry {
     name_start: u32,
@@ -71,6 +75,7 @@ impl std::fmt::Display for NameTooLong {
 impl std::error::Error for NameTooLong {}
 
 impl Index {
+    /// An empty index.
     pub fn new() -> Index {
         Index {
             names: String::new(),
@@ -141,6 +146,7 @@ impl Index {
         Ok(id)
     }
 
+    /// The name of `id` as it is on disk.
     pub fn display_name(&self, id: u32) -> Option<&str> {
         let e = self.entries.get(id as usize)?;
         let start = e.display_start as usize;
@@ -148,12 +154,14 @@ impl Index {
             .get(start..(start + e.display_len as usize))
     }
 
+    /// The lowercased name of `id`, as search matches it.
     pub fn name(&self, id: u32) -> Option<&str> {
         let e = self.entries.get(id as usize)?;
         let start = e.name_start as usize;
         self.names.get(start..(start + e.name_len as usize))
     }
 
+    /// The path of `id`, starting with its root's full path.
     pub fn full_path(&self, id: u32) -> Option<std::path::PathBuf> {
         let mut parts = Vec::new();
         let mut curr = id;
@@ -190,6 +198,7 @@ impl Index {
         self.entries.len()
     }
 
+    /// True if the index has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

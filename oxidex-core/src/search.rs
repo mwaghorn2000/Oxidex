@@ -23,12 +23,14 @@ pub use crate::matching::Tier;
 use crate::matching::{Query, Scratch, folders_match, match_history, match_name};
 use crate::score::{Candidate, Scorer, total};
 
+/// One search result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
     /// Position of the hit's index in the slice passed to `search`.
     pub index: u32,
     /// Entry ID within that index.
     pub id: u32,
+    /// What kind of match it is.
     pub tier: Tier,
     /// How good the hit is within its tier: the total of every scorer's
     /// points. Higher is better.
@@ -39,7 +41,9 @@ pub struct Hit {
 /// exactly these `indexes` (see `History::resolve`): its links are entry IDs,
 /// which only mean something for the walk that made them.
 pub struct Sources<'a> {
+    /// The indexes to search. Hits name an index by its position here.
     pub indexes: &'a [Arc<Index>],
+    /// Opened files, resolved against `indexes`.
     pub history: &'a History,
 }
 
@@ -67,6 +71,7 @@ impl std::error::Error for Cancelled {}
 static NEVER: AtomicU64 = AtomicU64::new(0);
 
 impl<'a> Cancel<'a> {
+    /// A search for `generation`, cancelled once `latest` holds anything else.
     pub fn new(latest: &'a AtomicU64, generation: u64) -> Cancel<'a> {
         Cancel { latest, generation }
     }
@@ -79,6 +84,7 @@ impl<'a> Cancel<'a> {
         }
     }
 
+    /// True once a newer generation has started.
     pub fn is_cancelled(&self) -> bool {
         // Relaxed is enough: the counter is only a stop flag and no other data
         // is passed through it. Seeing the bump a little late just means a

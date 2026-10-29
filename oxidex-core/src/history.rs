@@ -37,6 +37,7 @@ pub struct History {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One opened file and its frecency score.
 pub struct Record {
     // Kept as a `String`: `record_open` only accepts UTF-8 paths, because
     // JSON strings must be UTF-8.
@@ -48,6 +49,7 @@ pub struct Record {
 }
 
 impl Record {
+    /// The opened file's path.
     pub fn path(&self) -> &Path {
         Path::new(&self.path)
     }
@@ -61,10 +63,12 @@ impl Record {
 }
 
 impl History {
+    /// An empty history.
     pub fn new() -> History {
         History::default()
     }
 
+    /// Every record, in the order first opened.
     pub fn records(&self) -> &[Record] {
         &self.records
     }

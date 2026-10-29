@@ -1,3 +1,4 @@
+//! Crawling a folder into an `Index`.
 use std::fs;
 use std::io;
 use std::num::NonZeroUsize;
@@ -30,8 +31,10 @@ const SKIP_DIRS: &[&str] = &[
     ".rustup",
 ];
 
+/// What `walk` returns.
 #[derive(Debug)]
 pub struct Walk {
+    /// Everything found under the root.
     pub index: Index,
     /// Folders that couldn't be read, names that aren't valid UTF-8, and
     /// entries the OS failed to list.

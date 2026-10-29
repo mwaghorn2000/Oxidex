@@ -14,8 +14,11 @@ use crate::matching::Tier;
 /// Everything a scorer may look at for one matched entry. New fields can be
 /// added without changing existing scorers.
 pub struct Candidate<'a> {
+    /// The index the entry is in.
     pub index: &'a Index,
+    /// Entry ID within `index`.
     pub id: u32,
+    /// The tier the name matched in.
     pub tier: Tier,
     /// Match quality from the matcher, 0 to 1000.
     pub quality: i32,
@@ -26,6 +29,7 @@ pub struct Candidate<'a> {
     pub now: u64,
 }
 
+/// One ranking signal.
 pub trait Scorer: Send + Sync {
     /// Short label for tuning output, e.g. "modified".
     fn name(&self) -> &'static str;
@@ -35,6 +39,7 @@ pub trait Scorer: Send + Sync {
 
 /// Match quality as points, so its weight is tuned alongside the others.
 pub struct Quality {
+    /// Points per point of match quality.
     pub weight: i32,
 }
 
@@ -52,7 +57,9 @@ impl Scorer for Quality {
 /// boost halves every `half_life_days`. Applies to opened files too, with
 /// `Frecency` added on top, so opening a file can only raise its score.
 pub struct Modified {
+    /// Points for a file modified just now.
     pub max_boost: i32,
+    /// Days for the boost to halve.
     pub half_life_days: u64,
 }
 
@@ -80,7 +87,9 @@ impl Scorer for Modified {
 /// open, decayed by `Record::frecency`, up to `max_boost`. See RANKING.md,
 /// "Frecency".
 pub struct Frecency {
+    /// Points per open, before decay.
     pub points_per_open: i32,
+    /// Most points a file can get.
     pub max_boost: i32,
 }
 
