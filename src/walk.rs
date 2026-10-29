@@ -37,8 +37,9 @@ pub struct Walk {
     pub skipped: u64,
 }
 
-// Crawls `root` and returns an index of everything under it. The root entry's
-// name is its full canonical path, so `full_path` gives absolute paths. Only
+// Crawls `root` and returns an index of everything under it. The root entry
+// shows its full canonical path, so `full_path` gives absolute paths, but is
+// matched by its last part like any other folder. Only
 // fails if `root` itself can't be read. `workers` is how many threads read
 // folders. One crawls on the calling thread and uses the least CPU; more
 // finish sooner.
@@ -60,7 +61,7 @@ pub fn walk(root: &Path, workers: NonZeroUsize) -> io::Result<Walk> {
     };
     let Ok(root_id) = walk
         .index
-        .push(&name, u32::MAX, is_dir, size, modified_secs(&meta))
+        .push_root(&name, is_dir, size, modified_secs(&meta))
     else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -290,21 +291,21 @@ mod tests {
 
     fn all_paths(index: &Index) -> Vec<PathBuf> {
         let mut paths = Vec::new();
-        let mut id = 0;
-        while index.name(id).is_some() {
+        for id in 0..index.len() as u32 {
             paths.push(index.full_path(id).unwrap());
-            id += 1;
         }
         paths.sort();
         paths
     }
 
     #[test]
-    fn root_name_is_full_path() {
-        let dir = temp_dir("root_name");
+    fn root_shows_full_path_and_matches_by_last_part() {
+        let dir = temp_dir("Root_Name");
         let walk = walk(&dir, WORKERS).unwrap();
         assert_eq!(walk.index.display_name(0), dir.to_str());
         assert_eq!(walk.index.full_path(0), Some(dir.clone()));
+        let last = dir.file_name().unwrap().to_str().unwrap().to_lowercase();
+        assert_eq!(walk.index.name(0), Some(last.as_str()));
         fs::remove_dir_all(&dir).unwrap();
     }
 

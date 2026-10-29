@@ -8,7 +8,7 @@
 // Scale: match quality is 0 to 1000 and each boost is capped at about 100,
 // so match quality decides unless a boost is large.
 use crate::index::Index;
-use crate::search::Tier;
+use crate::matching::Tier;
 
 // Everything a scorer may look at for one matched entry. New fields can be
 // added without changing existing scorers.
@@ -95,13 +95,14 @@ pub fn total(scorers: &[Box<dyn Scorer>], c: &Candidate) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::NO_PARENT;
 
     const DAY: u64 = 86_400;
     const NOW: u64 = 1_000 * DAY;
 
     fn index_modified_at(modified: u64) -> Index {
         let mut index = Index::new();
-        index.push("a.txt", u32::MAX, false, 0, modified).unwrap();
+        index.push("a.txt", NO_PARENT, false, 0, modified).unwrap();
         index
     }
 
