@@ -1,11 +1,13 @@
 // Command-line search, for trying search on real folders:
 // `cargo run --release -- <folder>...`
-// Walks each folder once. In a terminal, results update live as you type;
-// Esc or Ctrl-C quits. With piped input, reads one query per line instead,
-// so it can be scripted.
+// Walks each folder once. In a terminal, results update live as you type,
+// Up and Down move the highlight, Enter opens it and quits, and Esc or
+// Ctrl-C quits. With piped input, reads one query per line instead,
+// so it can be scripted. Opened files are kept in a history file that
+// ranks them higher next time (see `history_file`).
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,6 +17,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, queue};
+
+mod history_file;
+mod open;
 
 use oxidex::history::History;
 use oxidex::index::Index;
@@ -30,16 +35,40 @@ fn main() {
         eprintln!("usage: oxidex <folder>...");
         return;
     }
+    let history_path = history_file::path();
+    let mut history = match &history_path {
+        Some(path) => history_file::load(path),
+        None => History::new(),
+    };
     let indexes = index_all(&folders);
     if indexes.is_empty() {
         return;
     }
+    history.resolve(&indexes);
     if io::stdin().is_terminal() {
-        if let Err(e) = live(&indexes) {
-            eprintln!("terminal error: {e}");
+        match live(&indexes, &history) {
+            Ok(Some(opened)) => remember(&mut history, history_path.as_deref(), &opened),
+            Ok(None) => {}
+            Err(e) => eprintln!("terminal error: {e}"),
         }
     } else {
-        lines(&indexes);
+        lines(&indexes, &history);
+    }
+}
+
+// Counts an open of `opened` and saves the history. There's no `resolve`
+// after `record_open`, because the CLI quits once a file is open.
+fn remember(history: &mut History, path: Option<&Path>, opened: &Path) {
+    if let Err(e) = history.record_open(opened, now()) {
+        eprintln!("{}: not added to history: {e}", opened.display());
+        return;
+    }
+    let Some(path) = path else {
+        eprintln!("history not saved: no HOME or APPDATA to keep it in");
+        return;
+    };
+    if let Err(e) = history_file::save(history, path) {
+        eprintln!("{}: history not saved: {e}", path.display());
     }
 }
 
@@ -67,10 +96,8 @@ fn index_all(folders: &[String]) -> Vec<Arc<Index>> {
 // Line mode: one query per line, results printed below it. Line mode only
 // runs with piped input, so there's no prompt: nobody is there to see it,
 // and it would end up mixed into the output.
-fn lines(indexes: &[Arc<Index>]) {
+fn lines(indexes: &[Arc<Index>], history: &History) {
     let scorers = default_scorers();
-    // Empty: the CLI doesn't record opens yet.
-    let history = History::new();
     let mut out = Vec::new();
     let mut line = String::new();
     loop {
@@ -84,7 +111,7 @@ fn lines(indexes: &[Arc<Index>]) {
         if query.is_empty() {
             continue;
         }
-        let elapsed = timed_search(indexes, &history, query, LIMIT, &scorers, &mut out);
+        let elapsed = timed_search(indexes, history, query, LIMIT, &scorers, &mut out);
         for (rank, hit) in out.iter().enumerate() {
             let index = &indexes[hit.index as usize];
             let path = index.full_path(hit.id).unwrap_or_default();
@@ -101,27 +128,56 @@ fn lines(indexes: &[Arc<Index>]) {
 }
 
 // Live mode: the query on the top line, results redrawn under it on every
-// key press.
-fn live(indexes: &[Arc<Index>]) -> io::Result<()> {
+// key press. Returns the path opened, if any.
+fn live(indexes: &[Arc<Index>], history: &History) -> io::Result<Option<PathBuf>> {
     let _screen = Screen::enter()?;
     let scorers = default_scorers();
-    // Empty: the CLI doesn't record opens yet.
-    let history = History::new();
     let mut query = String::new();
     let mut out = Vec::new();
     let mut elapsed = Duration::ZERO;
+    // Row of the highlighted result in `out`.
+    let mut selected = 0;
+    // Why the last open failed, shown until the next key.
+    let mut error = None;
     loop {
-        draw(indexes, &query, &out, elapsed)?;
+        draw(indexes, &query, &out, selected, elapsed, error.take())?;
         match event::read()? {
             // Windows also reports key releases; only act on presses.
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Esc => return Ok(()),
+                KeyCode::Esc => return Ok(None),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(());
+                    return Ok(None);
                 }
-                KeyCode::Char(c) => query.push(c),
+                KeyCode::Enter => {
+                    let Some(hit) = out.get(selected) else {
+                        continue;
+                    };
+                    let Some(path) = indexes[hit.index as usize].full_path(hit.id) else {
+                        continue;
+                    };
+                    // Like a launcher popup: done once something is open.
+                    match open::open(&path) {
+                        Ok(()) => return Ok(Some(path)),
+                        Err(e) => error = Some(format!("Couldn't open {}: {e}", path.display())),
+                    }
+                    continue;
+                }
+                KeyCode::Up => {
+                    selected = move_selection(selected, false, out.len());
+                    continue;
+                }
+                KeyCode::Down => {
+                    selected = move_selection(selected, true, out.len());
+                    continue;
+                }
+                // A new query brings new results, so start again at the top.
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    selected = 0;
+                }
                 KeyCode::Backspace => {
                     query.pop();
+                    selected = 0;
                 }
                 _ => continue,
             },
@@ -132,8 +188,25 @@ fn live(indexes: &[Arc<Index>]) -> io::Result<()> {
         let (_, rows) = terminal::size()?;
         // One row for the query, one for the status line.
         let limit = usize::from(rows).saturating_sub(2).max(1);
-        elapsed = timed_search(indexes, &history, &query, limit, &scorers, &mut out);
+        elapsed = timed_search(indexes, history, &query, limit, &scorers, &mut out);
+        // A resize can leave fewer results than the highlighted row.
+        selected = clamp_selection(selected, out.len());
     }
+}
+
+// One row down or up from `selected`, stopping at the first and last of
+// `len` results rather than wrapping.
+fn move_selection(selected: usize, down: bool, len: usize) -> usize {
+    if down {
+        clamp_selection(selected + 1, len)
+    } else {
+        selected.saturating_sub(1)
+    }
+}
+
+// Keeps a highlighted row inside `len` results; row 0 when there are none.
+fn clamp_selection(selected: usize, len: usize) -> usize {
+    selected.min(len.saturating_sub(1))
 }
 
 // Raw mode and the alternate screen, undone on drop so the terminal is
@@ -155,7 +228,14 @@ impl Drop for Screen {
     }
 }
 
-fn draw(indexes: &[Arc<Index>], query: &str, hits: &[Hit], elapsed: Duration) -> io::Result<()> {
+fn draw(
+    indexes: &[Arc<Index>],
+    query: &str,
+    hits: &[Hit],
+    selected: usize,
+    elapsed: Duration,
+    error: Option<String>,
+) -> io::Result<()> {
     let (cols, rows) = terminal::size()?;
     let width = usize::from(cols);
     let mut stdout = io::stdout();
@@ -168,7 +248,7 @@ fn draw(indexes: &[Arc<Index>], query: &str, hits: &[Hit], elapsed: Duration) ->
     )?;
 
     // Results go on rows 1 up to the status line on the last row.
-    for (row, hit) in (1..rows.saturating_sub(1)).zip(hits) {
+    for (i, (row, hit)) in (1..rows.saturating_sub(1)).zip(hits).enumerate() {
         let index = &indexes[hit.index as usize];
         let path = index.full_path(hit.id).unwrap_or_default();
         let path = path.display().to_string();
@@ -178,20 +258,29 @@ fn draw(indexes: &[Arc<Index>], query: &str, hits: &[Hit], elapsed: Duration) ->
             None => ("", path.as_str()),
         };
         let (folder, name) = fit(folder, name, width.saturating_sub(2));
+        let highlight = if i == selected {
+            Attribute::Reverse
+        } else {
+            Attribute::NoReverse
+        };
         queue!(
             stdout,
             MoveTo(2, row),
+            SetAttribute(highlight),
             SetAttribute(Attribute::Dim),
             Print(folder),
-            SetAttribute(Attribute::Reset),
+            // Not `Reset`, which would also end the highlight.
+            SetAttribute(Attribute::NormalIntensity),
             SetAttribute(Attribute::Bold),
             Print(name),
             SetAttribute(Attribute::Reset),
         )?;
     }
 
-    let status = if query.is_empty() {
-        "Type to search. Esc quits.".to_string()
+    let status = if let Some(error) = error {
+        error
+    } else if query.is_empty() {
+        "Type to search. Up and Down select, Enter opens. Esc quits.".to_string()
     } else {
         format!("{} results in {elapsed:.1?}", hits.len())
     };
@@ -302,5 +391,22 @@ mod tests {
     #[test]
     fn zero_width_gives_nothing() {
         assert_eq!(fitted("/home/", "a.txt", 0), "");
+    }
+
+    #[test]
+    fn selection_moves_and_stops_at_the_ends() {
+        assert_eq!(move_selection(0, true, 3), 1);
+        assert_eq!(move_selection(2, true, 3), 2);
+        assert_eq!(move_selection(1, false, 3), 0);
+        assert_eq!(move_selection(0, false, 3), 0);
+        assert_eq!(move_selection(0, true, 0), 0);
+    }
+
+    #[test]
+    fn selection_stays_inside_the_results() {
+        assert_eq!(clamp_selection(2, 5), 2);
+        assert_eq!(clamp_selection(5, 5), 4);
+        assert_eq!(clamp_selection(3, 1), 0);
+        assert_eq!(clamp_selection(3, 0), 0);
     }
 }
