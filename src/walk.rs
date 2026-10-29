@@ -242,7 +242,7 @@ fn push_entries(walk: &mut Walk, batch: Batch) -> Vec<(PathBuf, u32)> {
             continue;
         };
         if let Some(path) = f.path
-            && !SKIP_DIRS.contains(&f.name.as_str())
+            && !is_skipped(&f.name)
         {
             dirs.push((path, id));
         }
@@ -275,6 +275,17 @@ pub fn distinct_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     kept
+}
+
+// True if `name` is in `SKIP_DIRS`. Windows and macOS filesystems ignore
+// case by default, so there `Node_Modules` is the same folder and is skipped
+// too. Elsewhere it's a different folder that may hold the user's own files.
+fn is_skipped(name: &str) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        SKIP_DIRS.iter().any(|d| d.eq_ignore_ascii_case(name))
+    } else {
+        SKIP_DIRS.contains(&name)
+    }
 }
 
 // `fs::canonicalize` returns Windows paths in verbatim form (`\\?\C:\...`).
@@ -371,6 +382,14 @@ mod tests {
         ];
         assert_eq!(all_paths(&walk.index), expected);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn skip_dirs_ignore_case_only_where_the_filesystem_does() {
+        assert!(is_skipped("node_modules"));
+        let ignores_case = cfg!(any(windows, target_os = "macos"));
+        assert_eq!(is_skipped("Node_Modules"), ignores_case);
+        assert!(!is_skipped("node_modules_backup"));
     }
 
     #[test]
