@@ -260,7 +260,7 @@ fn find_worst(indexes: &[Index], out: &[Hit]) -> usize {
 mod tests {
     use super::*;
     use crate::score::{Quality, default_scorers};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicU64;
 
     // A root folder with each name as a direct child file.
@@ -731,6 +731,21 @@ mod tests {
         assert_eq!(hits[0], ("/home/me/myproj".to_string(), Tier::Exact));
     }
 
+    // A query ending in 'Σ' lowercases to final 'ς', but the same letter in
+    // the middle of a name lowercases to 'σ'.
+    #[test]
+    fn final_sigma_query_matches_exact_and_prefix() {
+        let index = index_of(&["ΟΔΟΣ.txt", "ΟΔΟΣΤΡΩΜΑ.txt"]);
+        let hits = results(&index, "ΟΔΟΣ", 10);
+        assert_eq!(
+            hits,
+            [
+                ("ΟΔΟΣ.txt".to_string(), Tier::Exact),
+                ("ΟΔΟΣΤΡΩΜΑ.txt".to_string(), Tier::Prefix),
+            ]
+        );
+    }
+
     // A history with `paths` opened once each, resolved against `indexes`.
     fn history_of(indexes: &[Index], paths: &[&str]) -> History {
         let mut history = History::new();
@@ -855,6 +870,39 @@ mod tests {
                 ("slark.txt".to_string(), Tier::Exact),
             ]
         );
+    }
+
+    // Hits for a pasted path, against a root that has folders above it.
+    fn pasted(query: &str) -> Vec<PathBuf> {
+        let mut index = Index::new();
+        let root = index.push_root("/home/Me/Projects", true, 0, 0).unwrap();
+        let src = index.push("src", root, true, 0, 0).unwrap();
+        index.push("search.rs", src, false, 0, 0).unwrap();
+        let indexes = [index];
+        run(&indexes, query, 10, 0)
+            .iter()
+            .map(|h| indexes[0].full_path(h.id).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn pasted_full_path_matches_folders_above_the_root() {
+        let file = Path::new("/home/Me/Projects").join("src").join("search.rs");
+        for query in [
+            "/home/me/projects/src/search.rs",
+            "me/projects/src/search.rs",
+            "home/src/search.rs",
+            "./src/search.rs",
+            "~/projects/src/search.rs",
+        ] {
+            assert_eq!(pasted(query), std::slice::from_ref(&file), "{query}");
+        }
+    }
+
+    #[test]
+    fn folders_above_the_root_must_still_match() {
+        assert!(pasted("/home/other/projects/src/search.rs").is_empty());
+        assert!(pasted("projects/home/src/search.rs").is_empty());
     }
 
     #[test]

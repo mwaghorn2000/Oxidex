@@ -242,12 +242,50 @@ fn push_entries(walk: &mut Walk, batch: Batch) -> Vec<(PathBuf, u32)> {
             continue;
         };
         if let Some(path) = f.path
-            && !SKIP_DIRS.contains(&f.name.as_str())
+            && !is_skipped(&f.name)
         {
             dirs.push((path, id));
         }
     }
     dirs
+}
+
+// The search folders worth walking, in order: each made canonical, with
+// repeats and folders inside another listed folder dropped, so no file is
+// indexed twice (RANKING.md, "Input"). A folder that can't be made canonical
+// (it's missing, say) is kept as given, so `walk` reports the error.
+pub fn distinct_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let canonical: Vec<PathBuf> = roots
+        .iter()
+        .map(|r| fs::canonicalize(r).unwrap_or_else(|_| r.clone()))
+        .collect();
+    let mut kept = Vec::new();
+    for (i, root) in canonical.iter().enumerate() {
+        // `starts_with` compares whole components, so `/a/xy` isn't inside
+        // `/a/x`. Of two equal roots, the first is kept.
+        let covered = canonical.iter().enumerate().any(|(j, other)| {
+            if root == other {
+                j < i
+            } else {
+                root.starts_with(other)
+            }
+        });
+        if !covered {
+            kept.push(root.clone());
+        }
+    }
+    kept
+}
+
+// True if `name` is in `SKIP_DIRS`. Windows and macOS filesystems ignore
+// case by default, so there `Node_Modules` is the same folder and is skipped
+// too. Elsewhere it's a different folder that may hold the user's own files.
+fn is_skipped(name: &str) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        SKIP_DIRS.iter().any(|d| d.eq_ignore_ascii_case(name))
+    } else {
+        SKIP_DIRS.contains(&name)
+    }
 }
 
 // `fs::canonicalize` returns Windows paths in verbatim form (`\\?\C:\...`).
@@ -347,6 +385,14 @@ mod tests {
     }
 
     #[test]
+    fn skip_dirs_ignore_case_only_where_the_filesystem_does() {
+        assert!(is_skipped("node_modules"));
+        let ignores_case = cfg!(any(windows, target_os = "macos"));
+        assert_eq!(is_skipped("Node_Modules"), ignores_case);
+        assert!(!is_skipped("node_modules_backup"));
+    }
+
+    #[test]
     fn skip_dirs_are_listed_but_not_entered() {
         let dir = temp_dir("skip_dirs");
         fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
@@ -370,6 +416,43 @@ mod tests {
         // Walked directly, a skipped name is the root and is entered.
         let walk = super::walk(&dir.join("target"), WORKERS).unwrap();
         assert!(all_paths(&walk.index).contains(&dir.join("target/debug/app")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nested_and_repeated_roots_are_dropped() {
+        let dir = temp_dir("distinct_roots");
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        fs::create_dir(dir.join("c")).unwrap();
+        let roots = [
+            dir.join("a/b"),
+            dir.join("c"),
+            dir.join("a"),
+            dir.join("c/../c"),
+        ];
+        let canonical = |p: PathBuf| fs::canonicalize(p).unwrap();
+        assert_eq!(
+            distinct_roots(&roots),
+            [canonical(dir.join("c")), canonical(dir.join("a"))]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Folders inside are found by whole components, not by text.
+    #[test]
+    fn root_with_a_longer_name_is_not_nested() {
+        let dir = temp_dir("distinct_names");
+        fs::create_dir(dir.join("x")).unwrap();
+        fs::create_dir(dir.join("xy")).unwrap();
+        assert_eq!(distinct_roots(&[dir.join("x"), dir.join("xy")]).len(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_root_is_kept_for_walk_to_report() {
+        let dir = temp_dir("distinct_missing");
+        let missing = dir.join("nope");
+        assert_eq!(distinct_roots(std::slice::from_ref(&missing)), [missing]);
         fs::remove_dir_all(&dir).unwrap();
     }
 
