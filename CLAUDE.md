@@ -14,12 +14,15 @@ oxidex/
 │       ├── index.rs     # Index, Entry, packed name buffer
 │       ├── search.rs    # scanning indexes, keeping the top hits
 │       ├── matching.rs  # tiers and match quality for one name
+│       ├── score.rs     # ranking signals (Scorer trait)
+│       ├── history.rs   # opened files and frecency, owned by the frontend
 │       ├── extract/     # Extractor trait + implementations
 │       └── store.rs     # save/load index to disk
+├── oxidex-cli/    # binary `oxidex`: command-line search (crossterm)
 └── oxidex-app/    # binary: egui popup, hotkey, tray
 ```
 
-- `oxidex-core` never depends on UI crates.
+- `oxidex-core` never depends on UI crates. Its package is named `oxidex`, so code uses it as `oxidex::...`.
 - The indexer owns and mutates the `Index`. Search only takes `&Index`.
 
 ## Key design decisions
