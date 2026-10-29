@@ -107,6 +107,31 @@ const CANCEL_CHECK_EVERY: u32 = 4096;
 /// Path mode: if `query` contains `/` or `\`, the part after the last one is
 /// matched against names as usual, and each part before it must match a
 /// folder above the hit (see `folders_match`).
+///
+/// ```
+/// use std::num::NonZeroUsize;
+/// use std::sync::Arc;
+///
+/// use oxidex::{Cancel, History, Sources, default_scorers, search, walk};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = std::env::temp_dir().join(format!("oxidex-doc-{}", std::process::id()));
+/// std::fs::create_dir_all(dir.join("docs"))?;
+/// std::fs::write(dir.join("docs").join("readme.md"), "")?;
+///
+/// let indexes = vec![Arc::new(walk(&dir, NonZeroUsize::MIN)?.index)];
+/// let history = History::new();
+/// let sources = Sources { indexes: &indexes, history: &history };
+/// let mut hits = Vec::new();
+/// search(&sources, "readme", 10, &default_scorers(), 0, &Cancel::never(), &mut hits)?;
+///
+/// let top = hits[0];
+/// let path = indexes[top.index as usize].full_path(top.id);
+/// assert_eq!(path, Some(dir.canonicalize()?.join("docs").join("readme.md")));
+/// std::fs::remove_dir_all(&dir)?;
+/// # Ok(())
+/// # }
+/// ```
 pub fn search(
     sources: &Sources,
     query: &str,
