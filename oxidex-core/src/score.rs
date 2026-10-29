@@ -114,7 +114,7 @@ pub fn default_scorers() -> Vec<Box<dyn Scorer>> {
 }
 
 // The sum of every scorer's points for `c`.
-pub fn total(scorers: &[Box<dyn Scorer>], c: &Candidate) -> i32 {
+pub(crate) fn total(scorers: &[Box<dyn Scorer>], c: &Candidate) -> i32 {
     let mut sum = 0;
     for scorer in scorers {
         sum += scorer.score(c);

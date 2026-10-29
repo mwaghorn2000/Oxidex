@@ -32,7 +32,7 @@ pub struct Entry {
 // a name missing a query character can't match it exactly, and needs at
 // least one edit to match it as a typo. Shared bits and untracked characters
 // only make the filter let more names through, never fewer.
-pub fn char_mask(lowercase: &str) -> u64 {
+pub(crate) fn char_mask(lowercase: &str) -> u64 {
     let mut mask = 0;
     for b in lowercase.bytes() {
         let bit = match b {
@@ -181,7 +181,7 @@ impl Index {
         Some(self.entries.get(id as usize)?.modified)
     }
 
-    pub fn masks(&self) -> &[u64] {
+    pub(crate) fn masks(&self) -> &[u64] {
         &self.masks
     }
 
