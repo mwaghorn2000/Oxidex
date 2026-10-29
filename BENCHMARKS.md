@@ -265,3 +265,43 @@ modified-time scorers. Both run on every match, through
 
 The folder check adds 0–0.6 ms. `search.rs` is slow on its own: at 9
 characters it allows 2 typos, and the edit-distance tables are the cost.
+
+## store
+
+```sh
+cargo run --release --example store_time -- <path> <file>
+```
+
+Machine: Intel Core Ultra 5 226V (8 threads), WSL2 (kernel 6.18.33.2),
+ext4, rustc 1.97.1. The file is on ext4 and in the OS cache. Each figure is
+the median of 9 runs, and the table is the median of five such runs.
+
+| Folder | Entries | Walk (warm, 8 workers) | Save | Load | File size |
+|---|---|---|---|---|---|
+| `/home/mwagh` | 61,312 | 62 ms | 7.4 ms | 21.9 ms | 10.65 MB |
+
+The file is 173 bytes per entry: 33 for the entry and the rest for the two
+name buffers. Names here are long (69 bytes on average; 28,566 of them are
+126-character package folder names), so the buffers dominate.
+
+Loading is about 3× faster than a warm walk of the same folder. The real
+gain is over a cold walk, which took 12.66 s for 545k entries on the
+Ryzen machine above. A load with the file not yet in the OS cache wasn't
+measured (dropping the cache needs root).
+
+### Masks: rebuild or save
+
+| | Time on load | Extra file size |
+|---|---|---|
+| Rebuild from names (chosen) | 14.5 ms | 0 |
+| Read from the file | 0.02 ms | 490 KB (+4.6%) |
+
+Rebuilding is most of the load time, so saving the masks would make
+loading about 3× faster. They're rebuilt anyway: a saved mask can't be
+checked without rebuilding it, and a wrong one silently hides a name from
+search instead of failing the load. Rebuilding also means a change to
+`char_mask` can't leave old files with stale masks. 22 ms is well under
+what a person notices at startup, so correctness wins.
+
+This comparison was a one-off. Its code was removed from `store_time`
+once `char_mask` and `Index::masks` became crate-only.
