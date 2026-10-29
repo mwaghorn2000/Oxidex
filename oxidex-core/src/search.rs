@@ -1,18 +1,18 @@
-// Filename search over a list of indexes, one per search directory, ranked
-// together. See RANKING.md for the full plan.
-//
-// Results are ranked in three layers, each with its own place to extend:
-//
-// 1. Tier (`Tier`): what kind of match it is. A new kind of match is a new
-//    `Tier` variant plus a check in `match_name`, both in matching.rs, and
-//    `Query::may_match` must still let its names through.
-// 2. Score (`Hit::score`): how good the match is within its tier. It's the
-//    total of the `Scorer`s passed to `search`: match quality from
-//    `match_name`, plus signals like modified time. A new signal is a new
-//    `Scorer` in score.rs, added to `default_scorers`. Don't put signals in
-//    `match_name` or `compare`.
-// 3. Tiebreaks (`compare`): only for hits with equal tier and score, so the
-//    order never shuffles between searches. Not a place for ranking signals.
+//! Filename search over a list of indexes, one per search directory, ranked
+//! together. See RANKING.md for the full plan.
+//!
+//! Results are ranked in three layers, each with its own place to extend:
+//!
+//! 1. Tier (`Tier`): what kind of match it is. A new kind of match is a new
+//!    `Tier` variant plus a check in `match_name`, both in matching.rs, and
+//!    `Query::may_match` must still let its names through.
+//! 2. Score (`Hit::score`): how good the match is within its tier. It's the
+//!    total of the `Scorer`s passed to `search`: match quality from
+//!    `match_name`, plus signals like modified time. A new signal is a new
+//!    `Scorer` in score.rs, added to `default_scorers`. Don't put signals in
+//!    `match_name` or `compare`.
+//! 3. Tiebreaks (`compare`): only for hits with equal tier and score, so the
+//!    order never shuffles between searches. Not a place for ranking signals.
 use std::cmp::Ordering;
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicU64};
@@ -25,33 +25,33 @@ use crate::score::{Candidate, Scorer, total};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit {
-    // Position of the hit's index in the slice passed to `search`.
+    /// Position of the hit's index in the slice passed to `search`.
     pub index: u32,
-    // Entry ID within that index.
+    /// Entry ID within that index.
     pub id: u32,
     pub tier: Tier,
-    // How good the hit is within its tier: the total of every scorer's
-    // points. Higher is better.
+    /// How good the hit is within its tier: the total of every scorer's
+    /// points. Higher is better.
     pub score: i32,
 }
 
-// What search looks through. `history` must have been resolved against
-// exactly these `indexes` (see `History::resolve`): its links are entry IDs,
-// which only mean something for the walk that made them.
+/// What search looks through. `history` must have been resolved against
+/// exactly these `indexes` (see `History::resolve`): its links are entry IDs,
+/// which only mean something for the walk that made them.
 pub struct Sources<'a> {
     pub indexes: &'a [Arc<Index>],
     pub history: &'a History,
 }
 
-// Lets a newer query stop an older search. The UI bumps `latest` on every
-// keystroke and starts a search for the new generation; any search still
-// running for an older generation sees the change and stops.
+/// Lets a newer query stop an older search. The UI bumps `latest` on every
+/// keystroke and starts a search for the new generation; any search still
+/// running for an older generation sees the change and stops.
 pub struct Cancel<'a> {
     latest: &'a AtomicU64,
     generation: u64,
 }
 
-// Returned by `search` when it stopped because a newer query started.
+/// Returned by `search` when it stopped because a newer query started.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Cancelled;
 
@@ -71,7 +71,7 @@ impl<'a> Cancel<'a> {
         Cancel { latest, generation }
     }
 
-    // For searches nothing will cancel: tests, benchmarks, one-off searches.
+    /// For searches nothing will cancel: tests, benchmarks, one-off searches.
     pub fn never() -> Cancel<'static> {
         Cancel {
             latest: &NEVER,
@@ -92,15 +92,15 @@ impl<'a> Cancel<'a> {
 // within microseconds.
 const CANCEL_CHECK_EVERY: u32 = 4096;
 
-// Fills `out` with up to `limit` hits for `query` from all of `sources`,
-// best first. Matching is case-insensitive. Hits within a tier are ranked by
-// `scorers` (usually `score::default_scorers()`), with `now` in seconds since
-// 1970. If `cancel` fires, stops early, clears `out` so a partial list is
-// never shown, and returns `Cancelled`.
-//
-// Path mode: if `query` contains `/` or `\`, the part after the last one is
-// matched against names as usual, and each part before it must match a
-// folder above the hit (see `folders_match`).
+/// Fills `out` with up to `limit` hits for `query` from all of `sources`,
+/// best first. Matching is case-insensitive. Hits within a tier are ranked by
+/// `scorers` (usually `score::default_scorers()`), with `now` in seconds since
+/// 1970. If `cancel` fires, stops early, clears `out` so a partial list is
+/// never shown, and returns `Cancelled`.
+///
+/// Path mode: if `query` contains `/` or `\`, the part after the last one is
+/// matched against names as usual, and each part before it must match a
+/// folder above the hit (see `folders_match`).
 pub fn search(
     sources: &Sources,
     query: &str,

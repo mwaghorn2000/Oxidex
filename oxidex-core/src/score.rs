@@ -1,39 +1,39 @@
-// Ranking signals. Each signal is one `Scorer`, and `search` adds up every
-// scorer's points to rank hits within a tier. See RANKING.md, "Design".
-//
-// To add a signal: write a struct holding its tunable numbers, implement
-// `Scorer` for it, and add it to `default_scorers`. Nothing in search.rs
-// changes. To tune a signal, change its numbers in `default_scorers`.
-//
-// Scale: match quality is 0 to 1000 and each boost is capped at about 100,
-// so match quality decides unless a boost is large.
+//! Ranking signals. Each signal is one `Scorer`, and `search` adds up every
+//! scorer's points to rank hits within a tier. See RANKING.md, "Design".
+//!
+//! To add a signal: write a struct holding its tunable numbers, implement
+//! `Scorer` for it, and add it to `default_scorers`. Nothing in search.rs
+//! changes. To tune a signal, change its numbers in `default_scorers`.
+//!
+//! Scale: match quality is 0 to 1000 and each boost is capped at about 100,
+//! so match quality decides unless a boost is large.
 use crate::history::Record;
 use crate::index::Index;
 use crate::matching::Tier;
 
-// Everything a scorer may look at for one matched entry. New fields can be
-// added without changing existing scorers.
+/// Everything a scorer may look at for one matched entry. New fields can be
+/// added without changing existing scorers.
 pub struct Candidate<'a> {
     pub index: &'a Index,
     pub id: u32,
     pub tier: Tier,
-    // Match quality from the matcher, 0 to 1000.
+    /// Match quality from the matcher, 0 to 1000.
     pub quality: i32,
-    // The hit's history record, if the user has opened it through Oxidex.
+    /// The hit's history record, if the user has opened it through Oxidex.
     pub history: Option<&'a Record>,
-    // Seconds since 1970. Passed in rather than read from the clock so tests
-    // are deterministic and one search uses one time throughout.
+    /// Seconds since 1970. Passed in rather than read from the clock so tests
+    /// are deterministic and one search uses one time throughout.
     pub now: u64,
 }
 
 pub trait Scorer: Send + Sync {
-    // Short label for tuning output, e.g. "modified".
+    /// Short label for tuning output, e.g. "modified".
     fn name(&self) -> &'static str;
-    // Points for this candidate. Higher ranks higher.
+    /// Points for this candidate. Higher ranks higher.
     fn score(&self, c: &Candidate) -> i32;
 }
 
-// Match quality as points, so its weight is tuned alongside the others.
+/// Match quality as points, so its weight is tuned alongside the others.
 pub struct Quality {
     pub weight: i32,
 }
@@ -48,9 +48,9 @@ impl Scorer for Quality {
     }
 }
 
-// Newer files rank higher: a file modified just now gets `max_boost`, and the
-// boost halves every `half_life_days`. Applies to opened files too, with
-// `Frecency` added on top, so opening a file can only raise its score.
+/// Newer files rank higher: a file modified just now gets `max_boost`, and the
+/// boost halves every `half_life_days`. Applies to opened files too, with
+/// `Frecency` added on top, so opening a file can only raise its score.
 pub struct Modified {
     pub max_boost: i32,
     pub half_life_days: u64,
@@ -76,9 +76,9 @@ impl Scorer for Modified {
     }
 }
 
-// Files opened often and lately rank higher: `points_per_open` for each
-// open, decayed by `Record::frecency`, up to `max_boost`. See RANKING.md,
-// "Frecency".
+/// Files opened often and lately rank higher: `points_per_open` for each
+/// open, decayed by `Record::frecency`, up to `max_boost`. See RANKING.md,
+/// "Frecency".
 pub struct Frecency {
     pub points_per_open: i32,
     pub max_boost: i32,
@@ -98,7 +98,7 @@ impl Scorer for Frecency {
     }
 }
 
-// Every signal and its numbers, in one place.
+/// Every signal and its numbers, in one place.
 pub fn default_scorers() -> Vec<Box<dyn Scorer>> {
     vec![
         Box::new(Quality { weight: 1 }),
