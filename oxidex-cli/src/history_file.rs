@@ -46,10 +46,18 @@ pub fn load(path: &Path) -> History {
     }
 }
 
-// Saves `history` to `path` through a temporary file in the same folder,
-// renamed over the old one, so a crash mid-write can't leave half a file.
-// Same folder, because a rename can't cross filesystems.
+// Saves `history` to `path`, atomically (see `write_atomically`).
 pub fn save(history: &History, path: &Path) -> io::Result<()> {
+    write_atomically(path, |file| history.write_to(file))
+}
+
+// Writes `path` through a temporary file in the same folder, renamed over
+// the old one, so a crash mid-write can't leave half a file. Same folder,
+// because a rename can't cross filesystems. Creates the folder if needed.
+pub fn write_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
     if let Some(folder) = path.parent() {
         fs::create_dir_all(folder)?;
     }
@@ -57,18 +65,17 @@ pub fn save(history: &History, path: &Path) -> io::Result<()> {
     // The process ID keeps two CLIs saving at once off each other's file.
     temp.push(format!(".{}.tmp", std::process::id()));
     let temp = PathBuf::from(temp);
-    let result = write(history, &temp).and_then(|()| fs::rename(&temp, path));
+    let result = File::create(&temp)
+        .and_then(|mut file| {
+            write(&mut file)?;
+            // On disk before the rename, or a crash could leave an empty file.
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&temp, path));
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
     result
-}
-
-fn write(history: &History, path: &Path) -> io::Result<()> {
-    let mut file = File::create(path)?;
-    history.write_to(&mut file)?;
-    // On disk before the rename, or a crash could leave an empty file.
-    file.sync_all()
 }
 
 #[cfg(test)]
