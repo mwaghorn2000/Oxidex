@@ -5,7 +5,7 @@
 // so it can be scripted.
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -41,14 +41,16 @@ fn main() {
     }
 }
 
-// Walks each folder into its own index. Folders that can't be read are
-// reported and left out.
+// Walks each folder into its own index. Folders inside another one are left
+// out, so no file shows up twice, and so are folders that can't be read.
 fn index_all(folders: &[String]) -> Vec<Index> {
     let workers = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+    let roots: Vec<PathBuf> = folders.iter().map(PathBuf::from).collect();
     let mut indexes = Vec::new();
-    for folder in folders {
+    for root in oxidex::walk::distinct_roots(&roots) {
+        let folder = root.display();
         let start = Instant::now();
-        match oxidex::walk::walk(Path::new(folder), workers) {
+        match oxidex::walk::walk(&root, workers) {
             Ok(walk) => {
                 let entries = walk.index.len();
                 eprintln!("{folder}: {entries} entries in {:.0?}", start.elapsed());
