@@ -747,10 +747,10 @@ mod tests {
         assert_eq!(ids, [1]);
     }
 
-    // No scorer reads history yet, so it only changes where a hit is found,
-    // never the results.
+    // Frecency only reorders hits within a tier: opening files once each
+    // changes scores but never which hits there are or their tiers.
     #[test]
-    fn history_does_not_change_results_yet() {
+    fn history_keeps_hits_and_tiers() {
         let indexes = [tree()];
         let opened = [
             "root/docs",
@@ -761,10 +761,34 @@ mod tests {
         ];
         let history = history_of(&indexes, &opened);
         assert_eq!(history.resolved().count(), opened.len());
+        let tiers = |hits: Vec<Hit>| {
+            let mut tiers: Vec<(u32, Tier)> = hits.iter().map(|h| (h.id, h.tier)).collect();
+            tiers.sort();
+            tiers
+        };
         for query in ["readme", "docs", "rdm", "raedme", "docs/readme", "r"] {
             let with = run_with(&indexes, &history, query, 10, 0);
-            assert_eq!(with, run(&indexes, query, 10, 0), "{query}");
+            assert_eq!(tiers(with), tiers(run(&indexes, query, 10, 0)), "{query}");
         }
+    }
+
+    // Both are exact matches. Without history the shallower one would win
+    // the tiebreak.
+    #[test]
+    fn opened_file_ranks_higher_on_equal_match() {
+        let mut index = Index::new();
+        let root = index.push("root", u32::MAX, true, 0, 0).unwrap();
+        let docs = index.push("docs", root, true, 0, 0).unwrap();
+        let deep = index.push("a.txt", docs, false, 0, 0).unwrap();
+        let shallow = index.push("a.txt", root, false, 0, 0).unwrap();
+        let indexes = [index];
+        let ids = |hits: Vec<Hit>| hits.iter().map(|h| h.id).collect::<Vec<u32>>();
+        assert_eq!(ids(run(&indexes, "a.txt", 10, 0)), [shallow, deep]);
+        let history = history_of(&indexes, &["root/docs/a.txt"]);
+        assert_eq!(
+            ids(run_with(&indexes, &history, "a.txt", 10, 0)),
+            [deep, shallow]
+        );
     }
 
     #[test]

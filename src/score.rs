@@ -49,7 +49,8 @@ impl Scorer for Quality {
 }
 
 // Newer files rank higher: a file modified just now gets `max_boost`, and the
-// boost halves every `half_life_days`.
+// boost halves every `half_life_days`. Only for files never opened through
+// Oxidex: once a file has history, `Frecency` says more about it.
 pub struct Modified {
     pub max_boost: i32,
     pub half_life_days: u64,
@@ -61,6 +62,9 @@ impl Scorer for Modified {
     }
 
     fn score(&self, c: &Candidate) -> i32 {
+        if c.history.is_some() {
+            return 0;
+        }
         let Some(modified) = c.index.modified(c.id) else {
             return 0;
         };
@@ -75,6 +79,28 @@ impl Scorer for Modified {
     }
 }
 
+// Files opened often and lately rank higher: `points_per_open` for each
+// open, decayed by `Record::frecency`, up to `max_boost`. See RANKING.md,
+// "Frecency".
+pub struct Frecency {
+    pub points_per_open: i32,
+    pub max_boost: i32,
+}
+
+impl Scorer for Frecency {
+    fn name(&self) -> &'static str {
+        "frecency"
+    }
+
+    fn score(&self, c: &Candidate) -> i32 {
+        let Some(record) = c.history else {
+            return 0;
+        };
+        let points = record.frecency(c.now) * self.points_per_open as f64;
+        (points.round() as i32).min(self.max_boost)
+    }
+}
+
 // Every signal and its numbers, in one place.
 pub fn default_scorers() -> Vec<Box<dyn Scorer>> {
     vec![
@@ -82,6 +108,10 @@ pub fn default_scorers() -> Vec<Box<dyn Scorer>> {
         Box::new(Modified {
             max_boost: 50,
             half_life_days: 30,
+        }),
+        Box::new(Frecency {
+            points_per_open: 25,
+            max_boost: 100,
         }),
     ]
 }
@@ -98,6 +128,7 @@ pub fn total(scorers: &[Box<dyn Scorer>], c: &Candidate) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::History;
     use crate::index::NO_PARENT;
 
     const DAY: u64 = 86_400;
@@ -118,6 +149,28 @@ mod tests {
             history: None,
             now: NOW,
         }
+    }
+
+    // A record whose score is `score` as of `NOW`.
+    fn record(score: f64) -> Record {
+        let json = format!(
+            r#"{{"records": [{{"path": "/a.txt", "score": {score}, "counted_at": {NOW}}}]}}"#
+        );
+        History::read_from(json.as_bytes()).unwrap().records()[0].clone()
+    }
+
+    fn frecency_boost(record: &Record, now: u64) -> i32 {
+        let index = index_modified_at(0);
+        let c = Candidate {
+            history: Some(record),
+            now,
+            ..candidate(&index, 0)
+        };
+        let scorer = Frecency {
+            points_per_open: 25,
+            max_boost: 100,
+        };
+        scorer.score(&c)
     }
 
     fn modified_boost(modified: u64) -> i32 {
@@ -196,5 +249,62 @@ mod tests {
         let better = total(&scorers, &candidate(&old, 1000));
         let newer = total(&scorers, &candidate(&new, 900));
         assert!(better > newer, "{better} vs {newer}");
+    }
+
+    #[test]
+    fn frecency_gives_points_per_open() {
+        assert_eq!(frecency_boost(&record(1.0), NOW), 25);
+        assert_eq!(frecency_boost(&record(2.0), NOW), 50);
+    }
+
+    #[test]
+    fn frecency_is_capped() {
+        assert_eq!(frecency_boost(&record(9.0), NOW), 100);
+    }
+
+    #[test]
+    fn frecency_decays_with_time() {
+        assert_eq!(frecency_boost(&record(2.0), NOW + 7 * DAY), 25);
+    }
+
+    #[test]
+    fn no_history_gets_no_frecency() {
+        let index = index_modified_at(0);
+        let scorer = Frecency {
+            points_per_open: 25,
+            max_boost: 100,
+        };
+        assert_eq!(scorer.score(&candidate(&index, 0)), 0);
+    }
+
+    // Modified time is the fallback for files never opened through Oxidex.
+    #[test]
+    fn modified_gives_nothing_to_opened_files() {
+        let index = index_modified_at(NOW);
+        let record = record(1.0);
+        let c = Candidate {
+            history: Some(&record),
+            ..candidate(&index, 0)
+        };
+        let scorer = Modified {
+            max_boost: 100,
+            half_life_days: 30,
+        };
+        assert_eq!(scorer.score(&c), 0);
+    }
+
+    // On the default scale, a clearly better match beats a file opened often.
+    #[test]
+    fn better_match_beats_most_opened_file() {
+        let scorers = default_scorers();
+        let index = index_modified_at(0);
+        let opened = record(9.0);
+        let often = Candidate {
+            history: Some(&opened),
+            ..candidate(&index, 800)
+        };
+        let better = total(&scorers, &candidate(&index, 1000));
+        let often = total(&scorers, &often);
+        assert!(better > often, "{better} vs {often}");
     }
 }
