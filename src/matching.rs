@@ -15,7 +15,9 @@ use crate::index::{Index, char_mask, fold_case};
 // whatever their scores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
-    // The whole name, or the name without its extension.
+    // The whole name, or the name without its extension. Also a file opened
+    // almost daily that is within an edit or two of the query: see
+    // `match_history`.
     Exact,
     // The start of the name.
     Prefix,
@@ -37,6 +39,12 @@ const WORD_START: i32 = 8;
 const CONSECUTIVE: i32 = 8;
 const GAP_START: i32 = 3;
 const GAP_EXTEND: i32 = 1;
+
+// Tier jumping (RANKING.md): the history score a file needs to rank with the
+// exact matches. 4 is about 5 opens in the last 7 days.
+const JUMP_FRECENCY: f64 = 4.0;
+// Edits a tier jump allows for stems of 8+ characters (1 for shorter ones).
+const MAX_JUMP_EDITS: usize = 2;
 
 // The query in the forms matching needs, worked out once per search.
 pub(crate) struct Query {
@@ -116,6 +124,13 @@ impl Query {
             lacking += count.saturating_sub(have);
         }
         lacking
+    }
+
+    // `may_match` for `match_history`, whose extras allow up to 2 edits even
+    // when `max_edits` is lower (a tier jump), so up to 2 missing characters.
+    #[inline]
+    pub(crate) fn may_match_history(&self, mask: u64) -> bool {
+        (self.mask & !mask).count_ones() as usize <= self.max_edits.max(MAX_JUMP_EDITS)
     }
 }
 
@@ -259,6 +274,63 @@ pub(crate) fn match_name(name: &str, query: &Query, scratch: &mut Scratch) -> Op
         subsequence_score(name_chars, &query.chars)
     }?;
     Some((Tier::Subsequence, score))
+}
+
+// `match_name` for a file in the user's history, which is `frecency` (its
+// decayed score), with two extras that are only worth their cost on a list
+// this small. See RANKING.md, "Matching rules" and "Tier jumping". Run
+// `Query::may_match_history` first, not `may_match`: a jump allows edits a
+// short query otherwise doesn't get.
+pub(crate) fn match_history(
+    name: &str,
+    query: &Query,
+    frecency: f64,
+    scratch: &mut Scratch,
+) -> Option<(Tier, i32)> {
+    let normal = match_name(name, query, scratch);
+    if let Some((Tier::Exact, _)) = normal {
+        return normal;
+    }
+    let Scratch { name_chars, rows } = scratch;
+    name_chars.clear();
+    name_chars.extend(stem_of(name).chars());
+    let q = &query.chars;
+
+    // Tier jumping: a file opened almost daily whose stem is within an edit
+    // of the query (two for long stems) ranks with the exact matches, so
+    // `slark` finds a daily `slack.exe` above an unopened `slark.txt`.
+    if frecency >= JUMP_FRECENCY && q.len() >= 3 {
+        let max = if name_chars.len() >= 8 {
+            MAX_JUMP_EDITS
+        } else {
+            1
+        };
+        if let Some(edits) = edit_distance(name_chars, q, max, rows) {
+            return Some((Tier::Exact, 1000 / edits.max(1) as i32));
+        }
+    }
+    if let Some((Tier::Prefix | Tier::Levenshtein, _)) = normal {
+        return normal;
+    }
+
+    // Typos while typing: compare the query with each start of the stem
+    // near its own length, so `slar` finds `slack` before it's fully typed.
+    // Same edit allowance as `match_name`.
+    let max = query.max_edits;
+    let mut best: Option<usize> = None;
+    if max > 0 {
+        let shortest = q.len().saturating_sub(max).max(1);
+        let longest = (q.len() + max).min(name_chars.len());
+        for len in shortest..=longest {
+            if let Some(edits) = edit_distance(&name_chars[..len], q, max, rows) {
+                best = Some(best.map_or(edits, |b| b.min(edits)));
+            }
+        }
+    }
+    match best {
+        Some(edits) => Some((Tier::Levenshtein, 1000 / edits.max(1) as i32)),
+        None => normal,
+    }
 }
 
 // Path mode: true if each folder part matches a folder above `id`, in order.
@@ -578,5 +650,74 @@ mod tests {
         // One 'a' short, and a 3-letter query gets no typos.
         assert_eq!(tier("xaxa_long_file", "aaa"), None);
         assert_eq!(tier("eee.txt", "eeeeeeee"), None);
+    }
+
+    // `match_history` for an opened file with history score `frecency`, after
+    // the same mask filter search runs.
+    fn opened(name: &str, query: &str, frecency: f64) -> Option<Tier> {
+        let query = Query::new(query);
+        if !query.may_match_history(char_mask(name)) {
+            return None;
+        }
+        match_history(name, &query, frecency, &mut Scratch::default()).map(|(tier, _)| tier)
+    }
+
+    #[test]
+    fn daily_file_jumps_to_exact() {
+        assert_eq!(opened("slack.exe", "slark", 4.0), Some(Tier::Exact));
+    }
+
+    #[test]
+    fn file_opened_less_often_does_not_jump() {
+        assert_eq!(opened("slack.exe", "slark", 3.9), Some(Tier::Levenshtein));
+    }
+
+    // A 3-letter query gets no typos in `match_name`, but can still jump.
+    #[test]
+    fn three_letter_query_can_jump() {
+        assert_eq!(opened("cat.txt", "cay", 5.0), Some(Tier::Exact));
+        assert_eq!(opened("cat.txt", "cay", 0.0), None);
+    }
+
+    #[test]
+    fn two_letter_query_does_not_jump() {
+        assert_eq!(opened("ab.txt", "ax", 9.0), None);
+    }
+
+    #[test]
+    fn long_stem_jumps_within_two_edits() {
+        let tier = opened("documentation.pdf", "docuemntatoin", 4.0);
+        assert_eq!(tier, Some(Tier::Exact));
+    }
+
+    #[test]
+    fn short_stem_does_not_jump_with_two_edits() {
+        assert_eq!(opened("slack.exe", "slxcx", 9.0), None);
+    }
+
+    // Not a typo of "slack" yet, but one of its start "slac".
+    #[test]
+    fn opened_file_matches_typos_while_typing() {
+        assert_eq!(tier("slack.exe", "slar"), None);
+        assert_eq!(opened("slack.exe", "slar", 0.0), Some(Tier::Levenshtein));
+    }
+
+    // From RANKING.md's TODO: one wrong letter in a partly typed long name.
+    #[test]
+    fn opened_long_name_matches_typo_while_typing() {
+        let name = "the binding of isaac rebirth.url";
+        assert_eq!(
+            opened(name, "the binding of iscac", 0.0),
+            Some(Tier::Levenshtein)
+        );
+    }
+
+    // "slask" is a subsequence of the name, but also 1 edit from its start
+    // "slack", which is the better tier.
+    #[test]
+    fn typo_while_typing_beats_subsequence() {
+        let name = "slack_notes_sk";
+        assert_eq!(tier(name, "slask"), Some(Tier::Subsequence));
+        assert_eq!(opened(name, "slask", 0.0), Some(Tier::Levenshtein));
     }
 }
