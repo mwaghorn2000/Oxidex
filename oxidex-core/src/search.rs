@@ -55,6 +55,14 @@ pub struct Cancel<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Cancelled;
 
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("search cancelled by a newer query")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
 // Never bumped, so `Cancel::never` is never cancelled.
 static NEVER: AtomicU64 = AtomicU64::new(0);
 

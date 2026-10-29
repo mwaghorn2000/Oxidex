@@ -62,6 +62,14 @@ pub(crate) fn fold_case(text: &str) -> String {
 #[derive(Debug, PartialEq, Eq)]
 pub struct NameTooLong;
 
+impl std::fmt::Display for NameTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "name is longer than {} bytes", u16::MAX)
+    }
+}
+
+impl std::error::Error for NameTooLong {}
+
 impl Index {
     pub fn new() -> Index {
         Index {
@@ -199,6 +207,16 @@ impl Index {
             depth += 1;
         }
         Some(depth)
+    }
+}
+
+// Only the entry count: the buffers hold every name in the index, which
+// would bury anything else in the output.
+impl std::fmt::Debug for Index {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("Index")
+            .field("len", &self.entries.len())
+            .finish_non_exhaustive()
     }
 }
 

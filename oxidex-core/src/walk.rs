@@ -30,6 +30,7 @@ const SKIP_DIRS: &[&str] = &[
     ".rustup",
 ];
 
+#[derive(Debug)]
 pub struct Walk {
     pub index: Index,
     // Folders that couldn't be read, names that aren't valid UTF-8, and
