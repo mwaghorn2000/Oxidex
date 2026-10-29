@@ -302,3 +302,6 @@ checked without rebuilding it, and a wrong one silently hides a name from
 search instead of failing the load. Rebuilding also means a change to
 `char_mask` can't leave old files with stale masks. 22 ms is well under
 what a person notices at startup, so correctness wins.
+
+This comparison was a one-off. Its code was removed from `store_time`
+once `char_mask` and `Index::masks` became crate-only.

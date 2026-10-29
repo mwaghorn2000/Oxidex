@@ -115,6 +115,7 @@ mod tests {
     use crate::search::{Cancel, Hit, Sources, search};
     use std::fs;
     use std::num::NonZeroUsize;
+    use std::sync::Arc;
 
     // Where entry `id` starts in a saved file.
     fn entry_at(id: usize) -> usize {
@@ -152,7 +153,7 @@ mod tests {
         index
     }
 
-    fn hits(index: &Index, query: &str) -> Vec<Hit> {
+    fn hits(index: &Arc<Index>, query: &str) -> Vec<Hit> {
         let history = History::new();
         let sources = Sources {
             indexes: std::slice::from_ref(index),
@@ -173,10 +174,10 @@ mod tests {
         fs::write(dir.join("Docs/ẞig/İx.txt"), "").unwrap();
         fs::write(dir.join("ΟΔΟΣ.txt"), "").unwrap();
         let workers = NonZeroUsize::new(2).unwrap();
-        let before = crate::walk::walk(&dir, workers).unwrap().index;
+        let before = Arc::new(crate::walk::walk(&dir, workers).unwrap().index);
         fs::remove_dir_all(&dir).unwrap();
 
-        let after = load(&saved(&before)).unwrap();
+        let after = Arc::new(load(&saved(&before)).unwrap());
         assert_eq!(after.len(), before.len());
         let (a, b) = (after.parts().2, before.parts().2);
         for id in 0..before.len() as u32 {
@@ -311,6 +312,7 @@ mod tests {
                 bytes[at] ^= 1 << (next() % 8);
             }
             let Ok(index) = load(&bytes) else { continue };
+            let index = Arc::new(index);
             for id in 0..index.len() as u32 {
                 let _ = (index.name(id), index.display_name(id));
                 let _ = (index.full_path(id), index.depth(id));
