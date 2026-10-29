@@ -1,3 +1,4 @@
+pub mod history;
 pub mod index;
 mod matching;
 pub mod score;
