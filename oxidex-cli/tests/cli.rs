@@ -12,9 +12,14 @@ fn run_cli(test: &str, files: &[&str], input: &str) -> String {
     for file in files {
         fs::write(dir.join(file), "").unwrap();
     }
+    // Beside the folder, not in it, so it isn't indexed. Always set, so a
+    // test never reads the real user's history.
+    let history_path = dir.with_extension("history.json");
+    let _ = fs::remove_file(&history_path);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_oxidex"))
         .arg(&dir)
+        .env("OXIDEX_HISTORY", &history_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
