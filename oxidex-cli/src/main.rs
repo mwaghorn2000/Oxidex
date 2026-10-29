@@ -1,7 +1,7 @@
 // Command-line search, for trying search on real folders:
 // `cargo run --release -- <folder>...`
-// Walks each folder once. In a terminal, results update live as you type;
-// Esc or Ctrl-C quits. With piped input, reads one query per line instead,
+// Walks each folder once. In a terminal, results update live as you type,
+// Up and Down move the highlight, and Esc or Ctrl-C quits. With piped input, reads one query per line instead,
 // so it can be scripted.
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::num::NonZeroUsize;
@@ -110,8 +110,10 @@ fn live(indexes: &[Arc<Index>]) -> io::Result<()> {
     let mut query = String::new();
     let mut out = Vec::new();
     let mut elapsed = Duration::ZERO;
+    // Row of the highlighted result in `out`.
+    let mut selected = 0;
     loop {
-        draw(indexes, &query, &out, elapsed)?;
+        draw(indexes, &query, &out, selected, elapsed)?;
         match event::read()? {
             // Windows also reports key releases; only act on presses.
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
@@ -119,9 +121,22 @@ fn live(indexes: &[Arc<Index>]) -> io::Result<()> {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Ok(());
                 }
-                KeyCode::Char(c) => query.push(c),
+                KeyCode::Up => {
+                    selected = move_selection(selected, false, out.len());
+                    continue;
+                }
+                KeyCode::Down => {
+                    selected = move_selection(selected, true, out.len());
+                    continue;
+                }
+                // A new query brings new results, so start again at the top.
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    selected = 0;
+                }
                 KeyCode::Backspace => {
                     query.pop();
+                    selected = 0;
                 }
                 _ => continue,
             },
@@ -133,7 +148,24 @@ fn live(indexes: &[Arc<Index>]) -> io::Result<()> {
         // One row for the query, one for the status line.
         let limit = usize::from(rows).saturating_sub(2).max(1);
         elapsed = timed_search(indexes, &history, &query, limit, &scorers, &mut out);
+        // A resize can leave fewer results than the highlighted row.
+        selected = clamp_selection(selected, out.len());
     }
+}
+
+// One row down or up from `selected`, stopping at the first and last of
+// `len` results rather than wrapping.
+fn move_selection(selected: usize, down: bool, len: usize) -> usize {
+    if down {
+        clamp_selection(selected + 1, len)
+    } else {
+        selected.saturating_sub(1)
+    }
+}
+
+// Keeps a highlighted row inside `len` results; row 0 when there are none.
+fn clamp_selection(selected: usize, len: usize) -> usize {
+    selected.min(len.saturating_sub(1))
 }
 
 // Raw mode and the alternate screen, undone on drop so the terminal is
@@ -155,7 +187,13 @@ impl Drop for Screen {
     }
 }
 
-fn draw(indexes: &[Arc<Index>], query: &str, hits: &[Hit], elapsed: Duration) -> io::Result<()> {
+fn draw(
+    indexes: &[Arc<Index>],
+    query: &str,
+    hits: &[Hit],
+    selected: usize,
+    elapsed: Duration,
+) -> io::Result<()> {
     let (cols, rows) = terminal::size()?;
     let width = usize::from(cols);
     let mut stdout = io::stdout();
@@ -168,7 +206,7 @@ fn draw(indexes: &[Arc<Index>], query: &str, hits: &[Hit], elapsed: Duration) ->
     )?;
 
     // Results go on rows 1 up to the status line on the last row.
-    for (row, hit) in (1..rows.saturating_sub(1)).zip(hits) {
+    for (i, (row, hit)) in (1..rows.saturating_sub(1)).zip(hits).enumerate() {
         let index = &indexes[hit.index as usize];
         let path = index.full_path(hit.id).unwrap_or_default();
         let path = path.display().to_string();
@@ -178,12 +216,19 @@ fn draw(indexes: &[Arc<Index>], query: &str, hits: &[Hit], elapsed: Duration) ->
             None => ("", path.as_str()),
         };
         let (folder, name) = fit(folder, name, width.saturating_sub(2));
+        let highlight = if i == selected {
+            Attribute::Reverse
+        } else {
+            Attribute::NoReverse
+        };
         queue!(
             stdout,
             MoveTo(2, row),
+            SetAttribute(highlight),
             SetAttribute(Attribute::Dim),
             Print(folder),
-            SetAttribute(Attribute::Reset),
+            // Not `Reset`, which would also end the highlight.
+            SetAttribute(Attribute::NormalIntensity),
             SetAttribute(Attribute::Bold),
             Print(name),
             SetAttribute(Attribute::Reset),
@@ -191,7 +236,7 @@ fn draw(indexes: &[Arc<Index>], query: &str, hits: &[Hit], elapsed: Duration) ->
     }
 
     let status = if query.is_empty() {
-        "Type to search. Esc quits.".to_string()
+        "Type to search. Up and Down select. Esc quits.".to_string()
     } else {
         format!("{} results in {elapsed:.1?}", hits.len())
     };
@@ -302,5 +347,22 @@ mod tests {
     #[test]
     fn zero_width_gives_nothing() {
         assert_eq!(fitted("/home/", "a.txt", 0), "");
+    }
+
+    #[test]
+    fn selection_moves_and_stops_at_the_ends() {
+        assert_eq!(move_selection(0, true, 3), 1);
+        assert_eq!(move_selection(2, true, 3), 2);
+        assert_eq!(move_selection(1, false, 3), 0);
+        assert_eq!(move_selection(0, false, 3), 0);
+        assert_eq!(move_selection(0, true, 0), 0);
+    }
+
+    #[test]
+    fn selection_stays_inside_the_results() {
+        assert_eq!(clamp_selection(2, 5), 2);
+        assert_eq!(clamp_selection(5, 5), 4);
+        assert_eq!(clamp_selection(3, 1), 0);
+        assert_eq!(clamp_selection(3, 0), 0);
     }
 }
