@@ -19,7 +19,7 @@ use std::sync::atomic::{self, AtomicU64};
 use crate::history::{History, Record};
 use crate::index::Index;
 pub use crate::matching::Tier;
-use crate::matching::{Query, Scratch, folders_match, match_name};
+use crate::matching::{Query, Scratch, folders_match, match_history, match_name};
 use crate::score::{Candidate, Scorer, total};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,7 +119,10 @@ pub fn search(
     let mut hit_for = |number: u32, id: u32, record: Option<&Record>| -> Option<Hit> {
         let index = indexes.get(number as usize)?;
         let name = index.name(id)?;
-        let (tier, quality) = match_name(name, &query, &mut scratch)?;
+        let (tier, quality) = match record {
+            Some(record) => match_history(name, &query, record.frecency(now), &mut scratch)?,
+            None => match_name(name, &query, &mut scratch)?,
+        };
         // Checked after the name matches, so path mode costs nothing for
         // the names that don't.
         if !query.folders.is_empty() && !folders_match(index, id, &query.folders) {
@@ -150,7 +153,8 @@ pub fn search(
     let mut worst = None;
 
     // Phase 1, history (RANKING.md, "Streaming"): the few files the user has
-    // opened. They're small in number, so no cancellation check is needed.
+    // opened, matched with `match_history`. They're small in number, so no
+    // cancellation check is needed.
     for (number, id, record) in history.resolved() {
         let mask = indexes
             .get(number as usize)
@@ -158,7 +162,7 @@ pub fn search(
         let Some(&mask) = mask else {
             continue;
         };
-        if !query.may_match(mask) {
+        if !query.may_match_history(mask) {
             continue;
         }
         if let Some(hit) = hit_for(number, id, Some(record)) {
@@ -747,8 +751,9 @@ mod tests {
         assert_eq!(ids, [1]);
     }
 
-    // Frecency only reorders hits within a tier: opening files once each
-    // changes scores but never which hits there are or their tiers.
+    // Files opened once each are well below the tier-jump score, and these
+    // queries aren't typos of a name being typed, so history only changes
+    // scores here: the same hits, in the same tiers.
     #[test]
     fn history_keeps_hits_and_tiers() {
         let indexes = [tree()];
@@ -810,5 +815,63 @@ mod tests {
         let history = history_of(&other, &["root/a.txt"]);
         let indexes = [index_of(&["notes.md"])];
         assert!(run_with(&indexes, &history, "a.txt", 10, 0).is_empty());
+    }
+
+    // `path` opened with history score `score` as of time 0, resolved
+    // against `indexes`.
+    fn history_scored(indexes: &[Index], path: &str, score: f64) -> History {
+        let json =
+            format!(r#"{{"records": [{{"path": "{path}", "score": {score}, "counted_at": 0}}]}}"#);
+        let mut history = History::read_from(json.as_bytes()).unwrap();
+        history.resolve(indexes);
+        history
+    }
+
+    fn named(indexes: &[Index], hits: &[Hit]) -> Vec<(String, Tier)> {
+        hits.iter()
+            .map(|h| (indexes[0].display_name(h.id).unwrap().to_string(), h.tier))
+            .collect()
+    }
+
+    // RANKING.md's example: a typo of a daily-opened app beats an exact
+    // match nobody opens.
+    #[test]
+    fn daily_file_jumps_above_exact_match() {
+        let indexes = [index_of(&["slark.txt", "slack.exe"])];
+        let before = named(&indexes, &run(&indexes, "slark", 10, 0));
+        assert_eq!(
+            before,
+            [
+                ("slark.txt".to_string(), Tier::Exact),
+                ("slack.exe".to_string(), Tier::Levenshtein),
+            ]
+        );
+        let history = history_scored(&indexes, "root/slack.exe", 5.0);
+        let after = named(&indexes, &run_with(&indexes, &history, "slark", 10, 0));
+        assert_eq!(
+            after,
+            [
+                ("slack.exe".to_string(), Tier::Exact),
+                ("slark.txt".to_string(), Tier::Exact),
+            ]
+        );
+    }
+
+    #[test]
+    fn rarely_opened_file_does_not_jump() {
+        let indexes = [index_of(&["slark.txt", "slack.exe"])];
+        let history = history_scored(&indexes, "root/slack.exe", 1.0);
+        let hits = named(&indexes, &run_with(&indexes, &history, "slark", 10, 0));
+        assert_eq!(hits[0], ("slark.txt".to_string(), Tier::Exact));
+    }
+
+    // Unopened names get no typos while typing; opened ones do.
+    #[test]
+    fn only_opened_files_match_typos_while_typing() {
+        let indexes = [index_of(&["slack.exe", "slick.txt"])];
+        assert!(run(&indexes, "slar", 10, 0).is_empty());
+        let history = history_scored(&indexes, "root/slack.exe", 1.0);
+        let hits = named(&indexes, &run_with(&indexes, &history, "slar", 10, 0));
+        assert_eq!(hits, [("slack.exe".to_string(), Tier::Levenshtein)]);
     }
 }
