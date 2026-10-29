@@ -6,6 +6,8 @@
 // Adding a tier: see the overview at the top of search.rs. `may_match` runs
 // first, so anything a new tier matches must pass it, or search skips the
 // name before `match_name` sees it.
+use std::path::{Component, Path};
+
 use crate::index::{Index, char_mask, fold_case};
 
 // Ordered best first, so sorting by tier puts exact matches on top. Tiers
@@ -60,10 +62,11 @@ impl Query {
         let mut parts: Vec<&str> = lowercase.split(['/', '\\']).collect();
         let text = parts.pop().unwrap_or_default().to_string();
         // Empty parts ("/notes", "docs//notes") would match any folder, so
-        // they're dropped rather than checked.
+        // they're dropped rather than checked. So are "." and "~" from pasted
+        // relative or home paths: they name no folder in the index.
         let folders = parts
             .into_iter()
-            .filter(|p| !p.is_empty())
+            .filter(|p| !p.is_empty() && *p != "." && *p != "~")
             .map(String::from)
             .collect();
         let chars: Vec<char> = text.chars().collect();
@@ -226,7 +229,9 @@ pub(crate) fn match_name(name: &str, query: &Query, scratch: &mut Scratch) -> Op
 // The last part matches the nearest such folder and each earlier part one
 // further up, so `a/b/x` needs `b` inside `a`. Taking the nearest match each
 // time never misses a chain that a later choice would have found. Parts
-// match as a subsequence, so `dcs` matches `docs`.
+// match as a subsequence, so `dcs` matches `docs`. Parts left over at the
+// root are matched against the folders in the root's own path, so a pasted
+// full path like `/home/me/projects/x` works with the root `/home/me/projects`.
 pub(crate) fn folders_match(index: &Index, id: u32, folders: &[String]) -> bool {
     // `None` means the parents form a cycle. The depth also bounds the walk.
     let Some(depth) = index.depth(id) else {
@@ -249,7 +254,32 @@ pub(crate) fn folders_match(index: &Index, id: u32, folders: &[String]) -> bool 
         }
         curr = parent;
     }
-    remaining == 0
+    if remaining == 0 {
+        return true;
+    }
+    // `curr` is the root now. Its name was its last part, so check the
+    // folders above that, nearest first. Rare enough (only path-mode hits
+    // with parts left over) that folding each part's case is fine.
+    let Some(root_path) = index.display_name(curr).map(Path::new) else {
+        return false;
+    };
+    let Some(above) = root_path.parent() else {
+        return false;
+    };
+    for part in above.components().rev() {
+        let Some(name) = part.as_os_str().to_str() else {
+            continue;
+        };
+        if matches!(part, Component::Normal(_) | Component::Prefix(_))
+            && in_order(&fold_case(name), &folders[remaining - 1])
+        {
+            remaining -= 1;
+            if remaining == 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // True if `part`'s characters appear in `name` in order. Compares `char`s,
