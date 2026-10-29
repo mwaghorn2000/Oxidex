@@ -54,6 +54,7 @@ Keep dependencies minimal. Prefer the standard library. Well-known, focused crat
 - **Surgical changes.** Touch only the lines the task needs. Don't reformat, rename, reorder, or refactor existing code that isn't part of the request.
 - **Don't rewrite working code** to suit your own style. Match the conventions already in the file.
 - If a request is unclear or would require changing a design decision above, ask before writing code.
+- Make code changes then ask me to commit
 
 ## Commits
 
