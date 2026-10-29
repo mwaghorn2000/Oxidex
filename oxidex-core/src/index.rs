@@ -208,6 +208,102 @@ impl Default for Index {
     }
 }
 
+// Bytes per entry in a saved index (see `store`).
+pub(crate) const ENTRY_BYTES: usize = 33;
+
+// Raw access for `store`, which saves the parts as they are and checks them
+// on the way back in.
+impl Index {
+    pub(crate) fn parts(&self) -> (&str, &str, &[Entry]) {
+        (&self.names, &self.display_names, &self.entries)
+    }
+
+    // Builds an index from loaded parts, checking everything the accessors
+    // rely on, so a corrupt file is an error here rather than a panic or a
+    // wrong slice later. Masks aren't saved but rebuilt: see BENCHMARKS.md,
+    // "store".
+    pub(crate) fn from_parts(
+        names: String,
+        display_names: String,
+        entries: Vec<Entry>,
+    ) -> Result<Index, &'static str> {
+        // `NO_PARENT` must never be a real ID.
+        if entries.len() >= NO_PARENT as usize {
+            return Err("too many entries");
+        }
+        let mut masks = Vec::with_capacity(entries.len());
+        for e in &entries {
+            // `get` is `None` when a range is out of bounds or splits a
+            // character.
+            let Some(name) = names.get(range(e.name_start, e.name_len)) else {
+                return Err("name out of bounds or not on a character boundary");
+            };
+            if display_names
+                .get(range(e.display_start, e.display_len))
+                .is_none()
+            {
+                return Err("display name out of bounds or not on a character boundary");
+            }
+            if e.parent != NO_PARENT && e.parent as usize >= entries.len() {
+                return Err("parent out of range");
+            }
+            masks.push(char_mask(name));
+        }
+        Ok(Index {
+            names,
+            display_names,
+            entries,
+            masks,
+        })
+    }
+}
+
+// Saturating, so a huge start can't overflow on 32-bit targets; the range is
+// then just out of bounds.
+fn range(start: u32, len: u16) -> std::ops::Range<usize> {
+    let start = start as usize;
+    start..start.saturating_add(len as usize)
+}
+
+impl Entry {
+    // The saved form: every field in declaration order, little-endian, with
+    // `is_dir` as one byte.
+    pub(crate) fn to_bytes(&self) -> [u8; ENTRY_BYTES] {
+        let mut b = [0; ENTRY_BYTES];
+        b[0..4].copy_from_slice(&self.name_start.to_le_bytes());
+        b[4..6].copy_from_slice(&self.name_len.to_le_bytes());
+        b[6..10].copy_from_slice(&self.display_start.to_le_bytes());
+        b[10..12].copy_from_slice(&self.display_len.to_le_bytes());
+        b[12..16].copy_from_slice(&self.parent.to_le_bytes());
+        b[16] = self.is_dir as u8;
+        b[17..25].copy_from_slice(&self.size.to_le_bytes());
+        b[25..33].copy_from_slice(&self.modified.to_le_bytes());
+        b
+    }
+
+    // Reads what `to_bytes` wrote. `None` if `is_dir` is neither 0 nor 1.
+    pub(crate) fn from_bytes(b: &[u8; ENTRY_BYTES]) -> Option<Entry> {
+        let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+        let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        let u64_at = |i: usize| (u32_at(i) as u64) | ((u32_at(i + 4) as u64) << 32);
+        let is_dir = match b[16] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Entry {
+            name_start: u32_at(0),
+            name_len: u16_at(4),
+            display_start: u32_at(6),
+            display_len: u16_at(10),
+            parent: u32_at(12),
+            is_dir,
+            size: u64_at(17),
+            modified: u64_at(25),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
