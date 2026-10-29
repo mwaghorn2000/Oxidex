@@ -9,7 +9,9 @@ real use.
 
 Each search directory has its own `Index`, so search takes `&[Index]` and
 identifies a result as (index number, entry id). Directories nested inside
-another listed directory are dropped, so no file is indexed twice.
+another listed directory are dropped, so no file is indexed twice
+(`walk::distinct_roots`). Each folder is made canonical first, and nesting
+is checked by whole path components, so `/a/xy` isn't inside `/a/x`.
 
 ## Order
 
@@ -40,8 +42,13 @@ jumping, below.
   - Folder parts match in order, but not necessarily as direct parents:
     `docs/notes` finds `docs/old/notes.txt`, and `a/b/x` needs `b` inside
     `a`.
-  - Empty parts are ignored (`/notes`, `docs//notes`). An empty file part
-    (`docs/`) returns nothing for now.
+  - Empty parts are ignored (`/notes`, `docs//notes`), and so are `.` and
+    `~` (`./src/x`, `~/projects/x`). An empty file part (`docs/`) returns
+    nothing for now.
+  - A root is matched by its last part, like any folder. Folder parts left
+    over at the root are matched against the folders in the root's own
+    path, so a pasted full path works: `/home/me/projects/src/x` with the
+    root `/home/me/projects`.
   - Folders are only checked after the file part matches, so path mode
     costs nothing for names that don't.
 - Queries of 1–2 characters only match exactly or as a prefix. Almost
@@ -102,6 +109,10 @@ either.
   subsequence could match the first byte of one character and the second
   byte of another.
 - No accent folding: `cafe` doesn't match `café`.
+- Names and queries are lowercased the same way (`index::fold_case`).
+  Greek final sigma `ς` is folded to `σ`, because plain lowercasing turns
+  a word-final `Σ` into `ς` and any other `Σ` into `σ`. Without this, the
+  query `ΟΔΟΣ` wouldn't be a prefix of `ΟΔΟΣΤΡΩΜΑ`.
 
 ## Scoring signals
 
