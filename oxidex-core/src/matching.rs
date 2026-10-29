@@ -10,24 +10,24 @@ use std::path::{Component, Path};
 
 use crate::index::{Index, char_mask, fold_case};
 
-// Ordered best first, so sorting by tier puts exact matches on top. Tiers
-// are strict: a hit in a better tier always ranks above one in a worse tier,
-// whatever their scores.
+/// Ordered best first, so sorting by tier puts exact matches on top. Tiers
+/// are strict: a hit in a better tier always ranks above one in a worse tier,
+/// whatever their scores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
-    // The whole name, or the name without its extension. Also a file opened
-    // almost daily that is within an edit or two of the query: see
-    // `match_history`.
+    /// The whole name, or the name without its extension. Also a file opened
+    /// almost daily that is within an edit or two of the query: see
+    /// `match_history`.
     Exact,
-    // The start of the name.
+    /// The start of the name.
     Prefix,
-    // Within a few typos (edits) of the name, with or without its extension.
-    // A swap of two neighbouring letters counts as one edit. Ranked above
-    // subsequence matches: a near-miss of the whole name says more than the
-    // query's letters scattered through a long name ("raedme" should find
-    // "readme.md" before "deprecatedMethod.js").
+    /// Within a few typos (edits) of the name, with or without its extension.
+    /// A swap of two neighbouring letters counts as one edit. Ranked above
+    /// subsequence matches: a near-miss of the whole name says more than the
+    /// query's letters scattered through a long name ("raedme" should find
+    /// "readme.md" before "deprecatedMethod.js").
     Levenshtein,
-    // The query's characters appear in the name in order, with gaps allowed.
+    /// The query's characters appear in the name in order, with gaps allowed.
     Subsequence,
 }
 

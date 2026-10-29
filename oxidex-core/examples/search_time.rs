@@ -4,6 +4,7 @@
 // (a page fault, a context switch) doesn't skew the result.
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,7 +28,7 @@ fn main() {
             return;
         }
     };
-    let index = walk.index;
+    let index = Arc::new(walk.index);
     println!("{root}: {} entries", index.len());
 
     for query in args {

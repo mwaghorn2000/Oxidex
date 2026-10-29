@@ -1,6 +1,9 @@
-// The parent of a root entry, which has none.
+//! The index of one search folder: every name under it, packed into
+//! shared buffers.
+/// The parent of a root entry, which has none.
 pub const NO_PARENT: u32 = u32::MAX;
 
+/// The names under one search folder, searched by `search::search`.
 pub struct Index {
     // Lowercased names, used for matching.
     names: String,
@@ -14,6 +17,7 @@ pub struct Index {
     masks: Vec<u64>,
 }
 
+/// One file or folder in an `Index`.
 #[allow(dead_code)]
 pub struct Entry {
     name_start: u32,
@@ -32,7 +36,7 @@ pub struct Entry {
 // a name missing a query character can't match it exactly, and needs at
 // least one edit to match it as a typo. Shared bits and untracked characters
 // only make the filter let more names through, never fewer.
-pub fn char_mask(lowercase: &str) -> u64 {
+pub(crate) fn char_mask(lowercase: &str) -> u64 {
     let mut mask = 0;
     for b in lowercase.bytes() {
         let bit = match b {
@@ -58,11 +62,20 @@ pub(crate) fn fold_case(text: &str) -> String {
     lowercase
 }
 
-// Returned by `push` when a name is longer than `u16::MAX` bytes.
+/// Returned by `push` when a name is longer than `u16::MAX` bytes.
 #[derive(Debug, PartialEq, Eq)]
 pub struct NameTooLong;
 
+impl std::fmt::Display for NameTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "name is longer than {} bytes", u16::MAX)
+    }
+}
+
+impl std::error::Error for NameTooLong {}
+
 impl Index {
+    /// An empty index.
     pub fn new() -> Index {
         Index {
             names: String::new(),
@@ -72,7 +85,7 @@ impl Index {
         }
     }
 
-    // Appends an entry and returns its ID. `parent` is `NO_PARENT` for a root.
+    /// Appends an entry and returns its ID. `parent` is `NO_PARENT` for a root.
     pub fn push(
         &mut self,
         name: &str,
@@ -84,10 +97,10 @@ impl Index {
         self.push_entry(name, name, parent, is_dir, size, modified)
     }
 
-    // Appends a root and returns its ID. `path` is its full path, shown at the
-    // start of every result path under it. Only its last part is matched,
-    // like any other folder's name, so a root can be found by its own name.
-    // A path with no last part ("/", "C:\") is matched whole.
+    /// Appends a root and returns its ID. `path` is its full path, shown at the
+    /// start of every result path under it. Only its last part is matched,
+    /// like any other folder's name, so a root can be found by its own name.
+    /// A path with no last part ("/", "C:\") is matched whole.
     pub fn push_root(
         &mut self,
         path: &str,
@@ -133,6 +146,7 @@ impl Index {
         Ok(id)
     }
 
+    /// The name of `id` as it is on disk.
     pub fn display_name(&self, id: u32) -> Option<&str> {
         let e = self.entries.get(id as usize)?;
         let start = e.display_start as usize;
@@ -140,12 +154,14 @@ impl Index {
             .get(start..(start + e.display_len as usize))
     }
 
+    /// The lowercased name of `id`, as search matches it.
     pub fn name(&self, id: u32) -> Option<&str> {
         let e = self.entries.get(id as usize)?;
         let start = e.name_start as usize;
         self.names.get(start..(start + e.name_len as usize))
     }
 
+    /// The path of `id`, starting with its root's full path.
     pub fn full_path(&self, id: u32) -> Option<std::path::PathBuf> {
         let mut parts = Vec::new();
         let mut curr = id;
@@ -162,31 +178,32 @@ impl Index {
         Some(parts.iter().rev().collect())
     }
 
-    // The folder `id` is in, or `None` for a root.
+    /// The folder `id` is in, or `None` for a root.
     pub fn parent(&self, id: u32) -> Option<u32> {
         let parent = self.entries.get(id as usize)?.parent;
         (parent != NO_PARENT).then_some(parent)
     }
 
-    // Seconds since 1970, or 0 if the OS couldn't say.
+    /// Seconds since 1970, or 0 if the OS couldn't say.
     pub fn modified(&self, id: u32) -> Option<u64> {
         Some(self.entries.get(id as usize)?.modified)
     }
 
-    pub fn masks(&self) -> &[u64] {
+    pub(crate) fn masks(&self) -> &[u64] {
         &self.masks
     }
 
-    // Number of entries. IDs run from 0 to `len() - 1`.
+    /// Number of entries. IDs run from 0 to `len() - 1`.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// True if the index has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    // Number of folders above `id`, so a root is 0.
+    /// Number of folders above `id`, so a root is 0.
     pub fn depth(&self, id: u32) -> Option<u32> {
         let mut depth = 0;
         let mut curr = self.entries.get(id as usize)?.parent;
@@ -199,6 +216,16 @@ impl Index {
             depth += 1;
         }
         Some(depth)
+    }
+}
+
+// Only the entry count: the buffers hold every name in the index, which
+// would bury anything else in the output.
+impl std::fmt::Debug for Index {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("Index")
+            .field("len", &self.entries.len())
+            .finish_non_exhaustive()
     }
 }
 

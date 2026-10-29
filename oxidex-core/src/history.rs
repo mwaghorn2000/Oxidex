@@ -1,15 +1,16 @@
-// Files opened through Oxidex, for the frecency signal. See RANKING.md,
-// "Frecency". The frontend owns a `History` and core never picks a file
-// location. The frontend's part:
-//
-// 1. At startup, load it with `read_from`, or start with `History::new`.
-// 2. After every walk, call `resolve`: entry IDs change with each walk.
-// 3. When the user opens a result, call `record_open`, then `resolve`, so
-//    a newly opened file gets its boost straight away.
-// 4. Save it with `write_to` whenever it likes.
+//! Files opened through Oxidex, for the frecency signal. See RANKING.md,
+//! "Frecency". The frontend owns a `History` and core never picks a file
+//! location. The frontend's part:
+//!
+//! 1. At startup, load it with `read_from`, or start with `History::new`.
+//! 2. After every walk, call `resolve`: entry IDs change with each walk.
+//! 3. When the user opens a result, call `record_open`, then `resolve`, so
+//!    a newly opened file gets its boost straight away.
+//! 4. Save it with `write_to` whenever it likes.
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -23,9 +24,9 @@ const MIN_GAP: u64 = 12 * HOUR;
 // A score halves every `HALF_LIFE`, so files you stopped using fade out.
 const HALF_LIFE: u64 = 7 * DAY;
 
-// Saved as JSON: `{"records": [{"path": ..., "score": ..., "counted_at": ...}]}`.
-// An object rather than a bare list, so fields can be added later without
-// breaking old files.
+/// Saved as JSON: `{"records": [{"path": ..., "score": ..., "counted_at": ...}]}`.
+/// An object rather than a bare list, so fields can be added later without
+/// breaking old files.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct History {
     records: Vec<Record>,
@@ -36,6 +37,7 @@ pub struct History {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One opened file and its frecency score.
 pub struct Record {
     // Kept as a `String`: `record_open` only accepts UTF-8 paths, because
     // JSON strings must be UTF-8.
@@ -47,12 +49,13 @@ pub struct Record {
 }
 
 impl Record {
+    /// The opened file's path.
     pub fn path(&self) -> &Path {
         Path::new(&self.path)
     }
 
-    // The score decayed to `now`, in seconds since 1970. A `now` before the
-    // last count means a wrong clock, so it gets no decay.
+    /// The score decayed to `now`, in seconds since 1970. A `now` before the
+    /// last count means a wrong clock, so it gets no decay.
     pub fn frecency(&self, now: u64) -> f64 {
         let age = now.saturating_sub(self.counted_at) as f64;
         self.score * 0.5_f64.powf(age / HALF_LIFE as f64)
@@ -60,21 +63,23 @@ impl Record {
 }
 
 impl History {
+    /// An empty history.
     pub fn new() -> History {
         History::default()
     }
 
+    /// Every record, in the order first opened.
     pub fn records(&self) -> &[Record] {
         &self.records
     }
 
-    // Links each record to the entry with its path in `indexes`, for `find`.
-    // Search works in entry IDs, and `Index` can't look a path up, so this
-    // does one pass per index: a hash lookup rules out almost every name,
-    // and only entries named like a record build a full path to compare.
-    // Records whose file isn't in any index stay unresolved. They're kept,
-    // and resolve again if the file comes back.
-    pub fn resolve(&mut self, indexes: &[Index]) {
+    /// Links each record to the entry with its path in `indexes`, for `find`.
+    /// Search works in entry IDs, and `Index` can't look a path up, so this
+    /// does one pass per index: a hash lookup rules out almost every name,
+    /// and only entries named like a record build a full path to compare.
+    /// Records whose file isn't in any index stay unresolved. They're kept,
+    /// and resolve again if the file comes back.
+    pub fn resolve(&mut self, indexes: &[Arc<Index>]) {
         self.resolved.clear();
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
         for (number, record) in self.records.iter().enumerate() {
@@ -113,8 +118,8 @@ impl History {
             .map(|&(index, id, r)| (index, id, &self.records[r]))
     }
 
-    // The record for entry `id` of index number `index`, as of the last
-    // `resolve`.
+    /// The record for entry `id` of index number `index`, as of the last
+    /// `resolve`.
     pub fn find(&self, index: u32, id: u32) -> Option<&Record> {
         let i = self
             .resolved
@@ -123,9 +128,9 @@ impl History {
         self.records.get(self.resolved[i].2)
     }
 
-    // Counts an open of `path` at `now`: +1 on the decayed score, unless the
-    // last counted open was under 12 hours ago. Fails for empty paths and
-    // paths that aren't UTF-8, which JSON can't hold.
+    /// Counts an open of `path` at `now`: +1 on the decayed score, unless the
+    /// last counted open was under 12 hours ago. Fails for empty paths and
+    /// paths that aren't UTF-8, which JSON can't hold.
     pub fn record_open(&mut self, path: &Path, now: u64) -> io::Result<()> {
         let Some(path) = path.to_str() else {
             return Err(invalid_input("path is not valid UTF-8"));
@@ -159,15 +164,15 @@ impl History {
         Ok(())
     }
 
-    // Writes the history as JSON.
+    /// Writes the history as JSON.
     pub fn write_to(&self, out: impl Write) -> io::Result<()> {
         let mut out = BufWriter::new(out);
         serde_json::to_writer_pretty(&mut out, self)?;
         out.flush()
     }
 
-    // Reads what `write_to` wrote. JSON that doesn't parse, or a record with
-    // an empty path or a negative score, is an `InvalidData` error.
+    /// Reads what `write_to` wrote. JSON that doesn't parse, or a record with
+    /// an empty path or a negative score, is an `InvalidData` error.
     pub fn read_from(input: impl Read) -> io::Result<History> {
         let history: History = serde_json::from_reader(BufReader::new(input))?;
         for r in &history.records {
@@ -202,14 +207,14 @@ mod tests {
 
     // root/a.txt, root/Docs/a.txt and root/Docs/ReadMe.md, with root at
     // `/r`. Returns the index and the IDs of the three files.
-    fn tree() -> (Index, [u32; 3]) {
+    fn tree() -> (Arc<Index>, [u32; 3]) {
         let mut index = Index::new();
         let root = index.push_root("/r", true, 0, 0).unwrap();
         let a = index.push("a.txt", root, false, 0, 0).unwrap();
         let docs = index.push("Docs", root, true, 0, 0).unwrap();
         let docs_a = index.push("a.txt", docs, false, 0, 0).unwrap();
         let readme = index.push("ReadMe.md", docs, false, 0, 0).unwrap();
-        (index, [a, docs_a, readme])
+        (Arc::new(index), [a, docs_a, readme])
     }
 
     fn history_of(paths: &[&str]) -> History {
@@ -358,7 +363,7 @@ mod tests {
         let b = other.push("b.txt", root, false, 0, 0).unwrap();
         let (index, [a, ..]) = tree();
         let mut history = history_of(&["/s/b.txt", "/r/a.txt"]);
-        history.resolve(&[index, other]);
+        history.resolve(&[index, Arc::new(other)]);
         assert_eq!(history.find(0, a).unwrap().path(), Path::new("/r/a.txt"));
         assert_eq!(history.find(1, b).unwrap().path(), Path::new("/s/b.txt"));
         assert!(history.find(1, a).is_none());
