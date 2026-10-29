@@ -15,9 +15,12 @@ fn run_cli(test: &str, files: &[&str], history: Option<&str>, input: &str) -> St
         fs::write(dir.join(file), "").unwrap();
     }
     // Beside the folder, not in it, so it isn't indexed. Always set, so a
-    // test never reads the real user's history.
-    let history_path = dir.with_extension("history.json");
-    let _ = fs::remove_file(&history_path);
+    // test never reads the real user's history. A folder of its own, because
+    // saved indexes go beside the history file.
+    let data = dir.with_extension("data");
+    let _ = fs::remove_dir_all(&data);
+    fs::create_dir_all(&data).unwrap();
+    let history_path = data.join("history.json");
     if let Some(history) = history {
         let folder = fs::canonicalize(&dir).unwrap();
         fs::write(&history_path, history.replace("{dir}", &json_path(&folder))).unwrap();
@@ -39,7 +42,12 @@ fn run_cli(test: &str, files: &[&str], history: Option<&str>, input: &str) -> St
         .unwrap();
     let output = child.wait_with_output().unwrap();
     fs::remove_dir_all(&dir).unwrap();
-    let _ = fs::remove_file(&history_path);
+    let saved = fs::read_dir(data.join("indexes")).map_or(0, |files| files.count());
+    fs::remove_dir_all(&data).unwrap();
+    assert_eq!(
+        saved, 1,
+        "line mode saves the walked index for the next start"
+    );
     String::from_utf8(output.stdout).unwrap()
 }
 

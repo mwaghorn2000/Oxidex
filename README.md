@@ -19,8 +19,10 @@ the repo:
 cargo run --release -- ~/projects ~/Documents
 ```
 
-Give it one or more folders. It walks each one once at startup, then shows
-a prompt. Start typing and the results update under the query:
+Give it one or more folders. The first time, it walks each one, then shows
+a prompt. After that it starts from the index it saved last time and
+re-walks in the background, so results are there at once. Start typing and
+the results update under the query:
 
 ```
 > oxdx/src/srch
@@ -28,9 +30,17 @@ a prompt. Start typing and the results update under the query:
   ...
 ```
 
+- **Up** and **Down** move the highlight. **Enter** opens the highlighted
+  file with your system's opener and quits.
+- Files you open are remembered, and rank higher the more often and the
+  more recently you open them. History and saved indexes are kept in
+  `~/.local/share/oxidex/` (or `$XDG_DATA_HOME/oxidex/`, or
+  `%APPDATA%\oxidex\` on Windows). Set `OXIDEX_HISTORY` to a file path to
+  keep them somewhere else.
 - **Backspace** deletes, and **Esc** or **Ctrl-C** quits.
 - If you pipe input in instead of typing, it reads one query per line and
-  prints the results. That's handy for scripts.
+  prints the results. That's handy for scripts. Piped runs always walk
+  fresh and never open anything.
 - Use `--release`. A debug build works, but it's much slower.
 - Dependency, build and cache folders (`node_modules`, `target`, `.git`,
   `.cache` and a few others) are listed but not entered, so their contents
@@ -135,9 +145,8 @@ change without discussion.
 
 ## What's next
 
-- Find typos in partly typed names (`the binding of iscac`).
-- Rank files you open often higher, and let a daily-opened file jump above
-  better matches. The `History` type is in; the frontend owns it and
-  records opens. Next it gets wired into search.
-- Save the index to disk, so it doesn't re-walk on every start.
+- Find typos in partly typed names (`the binding of iscac`) for every
+  file. Today only files you've opened get this.
+- A config file for search folders and folders to skip, and ranking
+  hidden folders lower.
 - The real app: popup, global hotkey, tray.

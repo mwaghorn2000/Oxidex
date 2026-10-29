@@ -9,6 +9,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -19,6 +20,7 @@ use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlt
 use crossterm::{execute, queue};
 
 mod history_file;
+mod index_cache;
 mod open;
 
 use oxidex::history::History;
@@ -40,20 +42,65 @@ fn main() {
         Some(path) => history_file::load(path),
         None => History::new(),
     };
-    let indexes = index_all(&folders);
+    let cache = history_path.as_deref().and_then(index_cache::folder);
+    let roots: Vec<PathBuf> = folders.iter().map(PathBuf::from).collect();
+    let roots = oxidex::walk::distinct_roots(&roots);
+    if !io::stdin().is_terminal() {
+        // Scripts get a fresh walk every time, so results are never stale.
+        let indexes = walk_and_save(&roots, cache.as_deref(), true);
+        history.resolve(&indexes);
+        lines(&indexes, &history);
+        return;
+    }
+    // With every folder saved, show those at once and re-walk in the
+    // background. Otherwise (a first run, a new folder) walk now.
+    let saved = cache.as_deref().and_then(|cache| load_all(&roots, cache));
+    let (indexes, refresh) = match saved {
+        Some(saved) => (saved, Some(refresh_in_background(roots, cache))),
+        None => (walk_and_save(&roots, cache.as_deref(), true), None),
+    };
     if indexes.is_empty() {
         return;
     }
     history.resolve(&indexes);
-    if io::stdin().is_terminal() {
-        match live(&indexes, &history) {
-            Ok(Some(opened)) => remember(&mut history, history_path.as_deref(), &opened),
-            Ok(None) => {}
-            Err(e) => eprintln!("terminal error: {e}"),
-        }
-    } else {
-        lines(&indexes, &history);
+    match live(indexes, &mut history, refresh) {
+        Ok(Some(opened)) => remember(&mut history, history_path.as_deref(), &opened),
+        Ok(None) => {}
+        Err(e) => eprintln!("terminal error: {e}"),
     }
+}
+
+// The saved index of every root, or `None` if any is missing or unusable.
+fn load_all(roots: &[PathBuf], cache: &Path) -> Option<Vec<Arc<Index>>> {
+    let mut indexes = Vec::new();
+    for root in roots {
+        indexes.push(Arc::new(index_cache::load(cache, root)?));
+    }
+    Some(indexes)
+}
+
+// Walks `roots` on another thread, saves the results, and sends them back.
+fn refresh_in_background(roots: Vec<PathBuf>, cache: Option<PathBuf>) -> Receiver<Vec<Arc<Index>>> {
+    let (send, receive) = mpsc::channel();
+    thread::spawn(move || {
+        // Quiet: printing would scribble over the live screen.
+        let indexes = walk_and_save(&roots, cache.as_deref(), false);
+        let _ = send.send(indexes);
+    });
+    receive
+}
+
+// Walks each root and, with a cache folder, saves each index there for the
+// next start. A save that fails only costs that speed-up, so it's ignored.
+fn walk_and_save(roots: &[PathBuf], cache: Option<&Path>, report: bool) -> Vec<Arc<Index>> {
+    let mut indexes = Vec::new();
+    for (root, index) in index_all(roots, report) {
+        if let Some(cache) = cache {
+            let _ = index_cache::save(cache, &root, &index);
+        }
+        indexes.push(index);
+    }
+    indexes
 }
 
 // Counts an open of `opened` and saves the history. There's no `resolve`
@@ -72,22 +119,25 @@ fn remember(history: &mut History, path: Option<&Path>, opened: &Path) {
     }
 }
 
-// Walks each folder into its own index. Folders inside another one are left
-// out, so no file shows up twice, and so are folders that can't be read.
-fn index_all(folders: &[String]) -> Vec<Arc<Index>> {
+// Walks each root (from `distinct_roots`, so no file shows up twice) into
+// its own index. Roots that can't be read are left out. `report` prints a
+// line per root to stderr.
+fn index_all(roots: &[PathBuf], report: bool) -> Vec<(PathBuf, Arc<Index>)> {
     let workers = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
-    let roots: Vec<PathBuf> = folders.iter().map(PathBuf::from).collect();
     let mut indexes = Vec::new();
-    for root in oxidex::walk::distinct_roots(&roots) {
+    for root in roots {
         let folder = root.display();
         let start = Instant::now();
-        match oxidex::walk::walk(&root, workers) {
+        match oxidex::walk::walk(root, workers) {
             Ok(walk) => {
-                let entries = walk.index.len();
-                eprintln!("{folder}: {entries} entries in {:.0?}", start.elapsed());
-                indexes.push(Arc::new(walk.index));
+                if report {
+                    let entries = walk.index.len();
+                    eprintln!("{folder}: {entries} entries in {:.0?}", start.elapsed());
+                }
+                indexes.push((root.clone(), Arc::new(walk.index)));
             }
-            Err(e) => eprintln!("{folder}: {e}"),
+            Err(e) if report => eprintln!("{folder}: {e}"),
+            Err(_) => {}
         }
     }
     indexes
@@ -128,8 +178,13 @@ fn lines(indexes: &[Arc<Index>], history: &History) {
 }
 
 // Live mode: the query on the top line, results redrawn under it on every
-// key press. Returns the path opened, if any.
-fn live(indexes: &[Arc<Index>], history: &History) -> io::Result<Option<PathBuf>> {
+// key press. Returns the path opened, if any. With `refresh`, `indexes` are
+// saved ones, swapped for the fresh walk's when it arrives.
+fn live(
+    mut indexes: Vec<Arc<Index>>,
+    history: &mut History,
+    mut refresh: Option<Receiver<Vec<Arc<Index>>>>,
+) -> io::Result<Option<PathBuf>> {
     let _screen = Screen::enter()?;
     let scorers = default_scorers();
     let mut query = String::new();
@@ -140,8 +195,36 @@ fn live(indexes: &[Arc<Index>], history: &History) -> io::Result<Option<PathBuf>
     // Why the last open failed, shown until the next key.
     let mut error = None;
     loop {
-        draw(indexes, &query, &out, selected, elapsed, error.take())?;
-        match event::read()? {
+        let note = refresh
+            .as_ref()
+            .map(|_| "Showing the saved index; refreshing.".to_string());
+        draw(
+            &indexes,
+            &query,
+            &out,
+            selected,
+            elapsed,
+            error.take().or(note),
+        )?;
+        let event = match wait(refresh.as_ref())? {
+            Wake::Event(event) => event,
+            // The background walk is done. Its entry IDs are new, so link
+            // history to them and search again.
+            Wake::Fresh(fresh) => {
+                indexes = fresh;
+                history.resolve(&indexes);
+                refresh = None;
+                selected = 0;
+                // Handled below like a resize: nothing else, then search.
+                Event::Resize(0, 0)
+            }
+            // The walk thread is gone without results: keep the saved ones.
+            Wake::Gone => {
+                refresh = None;
+                continue;
+            }
+        };
+        match event {
             // Windows also reports key releases; only act on presses.
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Esc => return Ok(None),
@@ -188,7 +271,7 @@ fn live(indexes: &[Arc<Index>], history: &History) -> io::Result<Option<PathBuf>
         let (_, rows) = terminal::size()?;
         // One row for the query, one for the status line.
         let limit = usize::from(rows).saturating_sub(2).max(1);
-        elapsed = timed_search(indexes, history, &query, limit, &scorers, &mut out);
+        elapsed = timed_search(&indexes, history, &query, limit, &scorers, &mut out);
         // A resize can leave fewer results than the highlighted row.
         selected = clamp_selection(selected, out.len());
     }
@@ -196,6 +279,31 @@ fn live(indexes: &[Arc<Index>], history: &History) -> io::Result<Option<PathBuf>
 
 // One row down or up from `selected`, stopping at the first and last of
 // `len` results rather than wrapping.
+// What woke the live loop.
+enum Wake {
+    Event(Event),
+    Fresh(Vec<Arc<Index>>),
+    Gone,
+}
+
+// Waits for the next terminal event. While a background walk is running,
+// also checks for its result every 100 ms.
+fn wait(refresh: Option<&Receiver<Vec<Arc<Index>>>>) -> io::Result<Wake> {
+    let Some(refresh) = refresh else {
+        return event::read().map(Wake::Event);
+    };
+    loop {
+        if event::poll(Duration::from_millis(100))? {
+            return event::read().map(Wake::Event);
+        }
+        match refresh.try_recv() {
+            Ok(fresh) => return Ok(Wake::Fresh(fresh)),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => return Ok(Wake::Gone),
+        }
+    }
+}
+
 fn move_selection(selected: usize, down: bool, len: usize) -> usize {
     if down {
         clamp_selection(selected + 1, len)
