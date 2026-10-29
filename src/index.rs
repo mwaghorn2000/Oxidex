@@ -1,3 +1,6 @@
+// The parent of a root entry, which has none.
+pub const NO_PARENT: u32 = u32::MAX;
+
 pub struct Index {
     // Lowercased names, used for matching.
     names: String,
@@ -57,7 +60,7 @@ impl Index {
         }
     }
 
-    // Appends an entry and returns its ID. `parent` is `u32::MAX` for a root.
+    // Appends an entry and returns its ID. `parent` is `NO_PARENT` for a root.
     pub fn push(
         &mut self,
         name: &str,
@@ -84,7 +87,7 @@ impl Index {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(path);
-        self.push_entry(last, path, u32::MAX, is_dir, size, modified)
+        self.push_entry(last, path, NO_PARENT, is_dir, size, modified)
     }
 
     // `name` is what search matches; `display` is what results show.
@@ -134,7 +137,7 @@ impl Index {
     pub fn full_path(&self, id: u32) -> Option<std::path::PathBuf> {
         let mut parts = Vec::new();
         let mut curr = id;
-        while curr != u32::MAX {
+        while curr != NO_PARENT {
             // A valid chain visits each entry at most once, so a longer one
             // means the parents form a cycle.
             if parts.len() >= self.entries.len() {
@@ -150,7 +153,7 @@ impl Index {
     // The folder `id` is in, or `None` for a root.
     pub fn parent(&self, id: u32) -> Option<u32> {
         let parent = self.entries.get(id as usize)?.parent;
-        (parent != u32::MAX).then_some(parent)
+        (parent != NO_PARENT).then_some(parent)
     }
 
     // Seconds since 1970, or 0 if the OS couldn't say.
@@ -175,7 +178,7 @@ impl Index {
     pub fn depth(&self, id: u32) -> Option<u32> {
         let mut depth = 0;
         let mut curr = self.entries.get(id as usize)?.parent;
-        while curr != u32::MAX {
+        while curr != NO_PARENT {
             // As in `full_path`, a chain longer than the index is a cycle.
             if depth as usize >= self.entries.len() {
                 return None;
@@ -219,7 +222,7 @@ mod tests {
     #[test]
     fn push_assigns_sequential_ids() {
         let mut index = Index::new();
-        assert_eq!(index.push("c", u32::MAX, true, 0, 0), Ok(0));
+        assert_eq!(index.push("c", NO_PARENT, true, 0, 0), Ok(0));
         assert_eq!(index.push("docs", 0, true, 0, 0), Ok(1));
         assert_eq!(index.push("a.txt", 1, false, 10, 0), Ok(2));
         assert_eq!(
@@ -252,14 +255,14 @@ mod tests {
     #[test]
     fn name_is_lowercased() {
         let mut index = Index::new();
-        let id = index.push("ReadMe.MD", u32::MAX, false, 0, 0).unwrap();
+        let id = index.push("ReadMe.MD", NO_PARENT, false, 0, 0).unwrap();
         assert_eq!(index.name(id), Some("readme.md"));
     }
 
     #[test]
     fn display_name_keeps_case() {
         let mut index = Index::new();
-        let id = index.push("ReadMe.MD", u32::MAX, false, 0, 0).unwrap();
+        let id = index.push("ReadMe.MD", NO_PARENT, false, 0, 0).unwrap();
         assert_eq!(index.display_name(id), Some("ReadMe.MD"));
     }
 
@@ -269,9 +272,9 @@ mod tests {
     #[test]
     fn lowercasing_that_changes_length() {
         let mut index = Index::new();
-        let a = index.push("ẞig", u32::MAX, false, 0, 0).unwrap();
-        let b = index.push("İx", u32::MAX, false, 0, 0).unwrap();
-        let c = index.push("plain", u32::MAX, false, 0, 0).unwrap();
+        let a = index.push("ẞig", NO_PARENT, false, 0, 0).unwrap();
+        let b = index.push("İx", NO_PARENT, false, 0, 0).unwrap();
+        let c = index.push("plain", NO_PARENT, false, 0, 0).unwrap();
         assert_eq!(index.name(a), Some("ßig"));
         assert_eq!(index.display_name(a), Some("ẞig"));
         assert_eq!(index.name(b), Some("i\u{307}x"));
@@ -283,9 +286,9 @@ mod tests {
     #[test]
     fn push_rejects_name_over_u16_max() {
         let mut index = Index::new();
-        index.push("ok", u32::MAX, false, 0, 0).unwrap();
+        index.push("ok", NO_PARENT, false, 0, 0).unwrap();
         let long = "x".repeat(u16::MAX as usize + 1);
-        assert_eq!(index.push(&long, u32::MAX, false, 0, 0), Err(NameTooLong));
+        assert_eq!(index.push(&long, NO_PARENT, false, 0, 0), Err(NameTooLong));
         // The failed push must not leave a partial entry or name behind.
         assert_eq!(index.name(1), None);
         assert_eq!(index.names, "ok");
@@ -301,15 +304,15 @@ mod tests {
         let long = "ẞ".repeat(21_846);
         assert!(long.len() > u16::MAX as usize);
         assert!(long.to_lowercase().len() <= u16::MAX as usize);
-        assert_eq!(index.push(&long, u32::MAX, false, 0, 0), Err(NameTooLong));
+        assert_eq!(index.push(&long, NO_PARENT, false, 0, 0), Err(NameTooLong));
     }
 
     #[test]
     fn name_returns_each_entry() {
         let mut index = Index::new();
-        let a = index.push("ab", u32::MAX, false, 0, 0).unwrap();
-        let b = index.push("c", u32::MAX, false, 0, 0).unwrap();
-        let c = index.push("def", u32::MAX, false, 0, 0).unwrap();
+        let a = index.push("ab", NO_PARENT, false, 0, 0).unwrap();
+        let b = index.push("c", NO_PARENT, false, 0, 0).unwrap();
+        let c = index.push("def", NO_PARENT, false, 0, 0).unwrap();
         assert_eq!(index.name(a), Some("ab"));
         assert_eq!(index.name(b), Some("c"));
         assert_eq!(index.name(c), Some("def"));
@@ -318,7 +321,7 @@ mod tests {
     #[test]
     fn name_out_of_range_is_none() {
         let mut index = Index::new();
-        index.push("ab", u32::MAX, false, 0, 0).unwrap();
+        index.push("ab", NO_PARENT, false, 0, 0).unwrap();
         assert_eq!(index.name(1), None);
         assert_eq!(index.name(u32::MAX - 1), None);
     }
@@ -327,8 +330,8 @@ mod tests {
     #[test]
     fn name_handles_multibyte() {
         let mut index = Index::new();
-        let a = index.push("café.txt", u32::MAX, false, 0, 0).unwrap();
-        let b = index.push("next", u32::MAX, false, 0, 0).unwrap();
+        let a = index.push("café.txt", NO_PARENT, false, 0, 0).unwrap();
+        let b = index.push("next", NO_PARENT, false, 0, 0).unwrap();
         assert_eq!(index.name(a), Some("café.txt"));
         assert_eq!(index.name(b), Some("next"));
     }
@@ -336,21 +339,21 @@ mod tests {
     #[test]
     fn full_path_of_root_is_its_name() {
         let mut index = Index::new();
-        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let root = index.push("c", NO_PARENT, true, 0, 0).unwrap();
         assert_eq!(index.full_path(root), Some(Path::new("c").to_path_buf()));
     }
 
     #[test]
     fn full_path_out_of_range_is_none() {
         let mut index = Index::new();
-        index.push("c", u32::MAX, true, 0, 0).unwrap();
+        index.push("c", NO_PARENT, true, 0, 0).unwrap();
         assert_eq!(index.full_path(1), None);
     }
 
     #[test]
     fn full_path_with_missing_parent_is_none() {
         let mut index = Index::new();
-        index.push("c", u32::MAX, true, 0, 0).unwrap();
+        index.push("c", NO_PARENT, true, 0, 0).unwrap();
         let orphan = index.push("a.txt", 7, false, 0, 0).unwrap();
         assert_eq!(index.full_path(orphan), None);
     }
@@ -367,7 +370,7 @@ mod tests {
     #[test]
     fn full_path_walks_parents() {
         let mut index = Index::new();
-        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let root = index.push("c", NO_PARENT, true, 0, 0).unwrap();
         let docs = index.push("docs", root, true, 0, 0).unwrap();
         let file = index.push("a.txt", docs, false, 0, 0).unwrap();
         assert_eq!(
@@ -379,7 +382,7 @@ mod tests {
     #[test]
     fn siblings_share_parent() {
         let mut index = Index::new();
-        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let root = index.push("c", NO_PARENT, true, 0, 0).unwrap();
         let a = index.push("a.txt", root, false, 0, 0).unwrap();
         let b = index.push("b.txt", root, false, 0, 0).unwrap();
         assert_eq!(index.full_path(a), Some(Path::new("c").join("a.txt")));
@@ -389,7 +392,7 @@ mod tests {
     #[test]
     fn depth_counts_parents() {
         let mut index = Index::new();
-        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let root = index.push("c", NO_PARENT, true, 0, 0).unwrap();
         let docs = index.push("docs", root, true, 0, 0).unwrap();
         let file = index.push("a.txt", docs, false, 0, 0).unwrap();
         assert_eq!(index.depth(root), Some(0));
@@ -408,7 +411,7 @@ mod tests {
     #[test]
     fn parent_returns_folder_above() {
         let mut index = Index::new();
-        let root = index.push("c", u32::MAX, true, 0, 0).unwrap();
+        let root = index.push("c", NO_PARENT, true, 0, 0).unwrap();
         let file = index.push("a.txt", root, false, 0, 0).unwrap();
         assert_eq!(index.parent(file), Some(root));
         assert_eq!(index.parent(root), None);
@@ -418,8 +421,8 @@ mod tests {
     #[test]
     fn modified_returns_each_entry() {
         let mut index = Index::new();
-        let a = index.push("a", u32::MAX, false, 0, 100).unwrap();
-        let b = index.push("b", u32::MAX, false, 0, 200).unwrap();
+        let a = index.push("a", NO_PARENT, false, 0, 100).unwrap();
+        let b = index.push("b", NO_PARENT, false, 0, 200).unwrap();
         assert_eq!(index.modified(a), Some(100));
         assert_eq!(index.modified(b), Some(200));
         assert_eq!(index.modified(b + 1), None);
@@ -451,8 +454,8 @@ mod tests {
     #[test]
     fn masks_hold_each_lowercased_name() {
         let mut index = Index::new();
-        index.push("AB", u32::MAX, false, 0, 0).unwrap();
-        index.push("c1", u32::MAX, false, 0, 0).unwrap();
+        index.push("AB", NO_PARENT, false, 0, 0).unwrap();
+        index.push("c1", NO_PARENT, false, 0, 0).unwrap();
         assert_eq!(index.masks(), [char_mask("ab"), char_mask("c1")]);
     }
 
@@ -460,7 +463,7 @@ mod tests {
     fn failed_push_adds_no_mask() {
         let mut index = Index::new();
         let long = "x".repeat(u16::MAX as usize + 1);
-        assert_eq!(index.push(&long, u32::MAX, false, 0, 0), Err(NameTooLong));
+        assert_eq!(index.push(&long, NO_PARENT, false, 0, 0), Err(NameTooLong));
         assert!(index.masks().is_empty());
     }
 }
