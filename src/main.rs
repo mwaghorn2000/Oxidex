@@ -73,7 +73,8 @@ fn lines(indexes: &[Index]) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
-        let query = line.trim();
+        // Only the line ending: spaces are part of the query (RANKING.md).
+        let query = line.trim_end_matches(['\n', '\r']);
         if query.is_empty() {
             continue;
         }
