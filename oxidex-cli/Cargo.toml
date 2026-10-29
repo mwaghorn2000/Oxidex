@@ -1,0 +1,12 @@
+[package]
+name = "oxidex-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "oxidex"
+path = "src/main.rs"
+
+[dependencies]
+oxidex = { path = "../oxidex-core" }
+crossterm = "0.29.0"

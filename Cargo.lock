@@ -152,9 +152,16 @@ dependencies = [
 name = "oxidex"
 version = "0.1.0"
 dependencies = [
- "crossterm",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "oxidex-cli"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "oxidex",
 ]
 
 [[package]]
