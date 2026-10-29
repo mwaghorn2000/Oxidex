@@ -54,6 +54,9 @@ pub(crate) struct Query {
     pub(crate) max_edits: usize,
     // `char_mask` of `text`, for `may_match`.
     pub(crate) mask: u64,
+    // Each character the query has more than once, with its count, for
+    // `lacking`. Usually empty.
+    repeats: Vec<(char, usize)>,
 }
 
 impl Query {
@@ -70,7 +73,15 @@ impl Query {
             .map(String::from)
             .collect();
         let chars: Vec<char> = text.chars().collect();
+        let mut repeats: Vec<(char, usize)> = Vec::new();
+        for &c in &chars {
+            let count = chars.iter().filter(|&&x| x == c).count();
+            if count > 1 && !repeats.iter().any(|&(r, _)| r == c) {
+                repeats.push((c, count));
+            }
+        }
         Query {
+            repeats,
             folders,
             ascii: text.is_ascii(),
             max_edits: max_edits(chars.len()),
@@ -87,6 +98,24 @@ impl Query {
     #[inline]
     pub(crate) fn may_match(&self, mask: u64) -> bool {
         (self.mask & !mask).count_ones() as usize <= self.max_edits
+    }
+
+    // How many copies of its repeated characters `name` lacks. The mask
+    // only says which characters a name has, not how many, so a query like
+    // "eeeeeeee" passes it for almost every name. Each edit supplies at most
+    // one missing copy, so a name lacking more than `max_edits` can't be a
+    // typo match, and one lacking any can't be a subsequence match.
+    fn lacking(&self, name: &str) -> usize {
+        let mut lacking = 0;
+        for &(c, count) in &self.repeats {
+            let have = if c.is_ascii() {
+                name.bytes().filter(|&b| b == c as u8).count()
+            } else {
+                name.chars().filter(|&x| x == c).count()
+            };
+            lacking += count.saturating_sub(have);
+        }
+        lacking
     }
 }
 
@@ -207,12 +236,19 @@ pub(crate) fn match_name(name: &str, query: &Query, scratch: &mut Scratch) -> Op
     if query.chars.len() < 3 {
         return None;
     }
+    let lacking = query.lacking(name);
+    if lacking > query.max_edits {
+        return None;
+    }
     if query.max_edits > 0
         && let Some(edits) = typo_edits(name, stem, query, scratch)
     {
         // One edit scores 1000, two score 500. Zero edits would have been an
         // exact match above.
         return Some((Tier::Levenshtein, 1000 / edits.max(1) as i32));
+    }
+    if lacking > 0 {
+        return None;
     }
     let score = if query.ascii {
         subsequence_score(name.as_bytes(), q.as_bytes())
@@ -522,5 +558,25 @@ mod tests {
             matched("notexooxs", "notebooks"),
             Some((Tier::Levenshtein, 500))
         );
+    }
+
+    // Counting repeated letters must never drop a real match.
+    #[test]
+    fn repeated_letters_still_match_every_tier() {
+        assert_eq!(tier("bookkeeper.txt", "bookkeeper"), Some(Tier::Exact));
+        assert_eq!(tier("aaab", "aaa"), Some(Tier::Prefix));
+        // "boookeeper" has one 'k' and three 'o's: 2 edits, allowed at 10.
+        assert_eq!(
+            tier("bookkeeper.txt", "boookeeper"),
+            Some(Tier::Levenshtein)
+        );
+        assert_eq!(tier("xaxaxa", "aaa"), Some(Tier::Subsequence));
+    }
+
+    #[test]
+    fn name_lacking_repeated_letters_does_not_match() {
+        // One 'a' short, and a 3-letter query gets no typos.
+        assert_eq!(tier("xaxa_long_file", "aaa"), None);
+        assert_eq!(tier("eee.txt", "eeeeeeee"), None);
     }
 }
