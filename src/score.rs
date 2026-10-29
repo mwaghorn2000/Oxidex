@@ -7,6 +7,7 @@
 //
 // Scale: match quality is 0 to 1000 and each boost is capped at about 100,
 // so match quality decides unless a boost is large.
+use crate::history::Record;
 use crate::index::Index;
 use crate::matching::Tier;
 
@@ -18,6 +19,8 @@ pub struct Candidate<'a> {
     pub tier: Tier,
     // Match quality from the matcher, 0 to 1000.
     pub quality: i32,
+    // The hit's history record, if the user has opened it through Oxidex.
+    pub history: Option<&'a Record>,
     // Seconds since 1970. Passed in rather than read from the clock so tests
     // are deterministic and one search uses one time throughout.
     pub now: u64,
@@ -112,6 +115,7 @@ mod tests {
             id: 0,
             tier: Tier::Exact,
             quality,
+            history: None,
             now: NOW,
         }
     }

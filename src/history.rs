@@ -99,6 +99,18 @@ impl History {
             }
         }
         self.resolved.sort_unstable();
+        // `record_open` never makes two records for one path, but a file
+        // edited by hand might. One link per entry, so it's one hit.
+        self.resolved
+            .dedup_by_key(|&mut (index, id, _)| (index, id));
+    }
+
+    // Every resolved entry and its record, as (index number, entry ID,
+    // record), for search's history phase.
+    pub(crate) fn resolved(&self) -> impl Iterator<Item = (u32, u32, &Record)> {
+        self.resolved
+            .iter()
+            .map(|&(index, id, r)| (index, id, &self.records[r]))
     }
 
     // The record for entry `id` of index number `index`, as of the last
@@ -342,6 +354,19 @@ mod tests {
         history.resolve(&[index]);
         history.resolve(&[]);
         assert!(history.find(0, a).is_none());
+    }
+
+    #[test]
+    fn duplicate_records_resolve_once() {
+        let (index, [a, ..]) = tree();
+        let json = r#"{"records": [
+            {"path": "/r/a.txt", "score": 1, "counted_at": 0},
+            {"path": "/r/a.txt", "score": 2, "counted_at": 0}
+        ]}"#;
+        let mut history = History::read_from(json.as_bytes()).unwrap();
+        history.resolve(&[index]);
+        assert_eq!(history.resolved().count(), 1);
+        assert!(history.find(0, a).is_some());
     }
 
     #[test]
