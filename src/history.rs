@@ -143,6 +143,14 @@ impl History {
             });
             return Ok(());
         };
+        // A last count in the future means the clock was wrong then (or is
+        // now). Left alone, it would block every later open until the real
+        // clock caught up, so move it to now. This open doesn't count, as if
+        // it fell within the gap.
+        if record.counted_at > now {
+            record.counted_at = now;
+            return Ok(());
+        }
         if now < record.counted_at.saturating_add(MIN_GAP) {
             return Ok(());
         }
@@ -248,6 +256,16 @@ mod tests {
     fn clock_before_last_count_gives_no_decay() {
         let record = &opened(&[NOW]).records[0];
         assert_close(record.frecency(NOW - DAY), 1.0);
+    }
+
+    // A record counted with a clock a year fast must not freeze: later opens
+    // at the real time count again.
+    #[test]
+    fn open_after_a_future_count_unfreezes_the_record() {
+        let mut times = vec![NOW + 365 * DAY];
+        times.extend((0..30).map(|day| NOW + day * DAY));
+        let history = opened(&times);
+        assert!(history.records()[0].frecency(NOW + 29 * DAY) > 3.0);
     }
 
     #[test]
