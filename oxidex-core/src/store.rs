@@ -1,22 +1,22 @@
-// Saves an index to disk and loads it back, so a frontend can show results
-// at startup while a fresh walk runs: a cold walk of a large tree takes
-// seconds. Core never picks a file location; the frontend does.
-//
-// The format, all integers little-endian:
-//
-// | Bytes            | Field                                 |
-// |------------------|---------------------------------------|
-// | 8                | magic, `OXIDEXIX`                     |
-// | 4                | format version, `VERSION`             |
-// | 4                | entry count                           |
-// | 4                | lowercased names length, in bytes     |
-// | 4                | display names length, in bytes        |
-// | count × 33       | entries, as `Entry::to_bytes`         |
-// | names length     | lowercased names, UTF-8               |
-// | display length   | display names, UTF-8                  |
-//
-// The buffers are written as they sit in memory, so saving and loading are
-// close to a copy. The masks aren't saved: `Index::from_parts` rebuilds them.
+//! Saves an index to disk and loads it back, so a frontend can show results
+//! at startup while a fresh walk runs: a cold walk of a large tree takes
+//! seconds. Core never picks a file location; the frontend does.
+//!
+//! The format, all integers little-endian:
+//!
+//! | Bytes            | Field                                 |
+//! |------------------|---------------------------------------|
+//! | 8                | magic, `OXIDEXIX`                     |
+//! | 4                | format version, `VERSION`             |
+//! | 4                | entry count                           |
+//! | 4                | lowercased names length, in bytes     |
+//! | 4                | display names length, in bytes        |
+//! | count × 33       | entries, as `Entry::to_bytes`         |
+//! | names length     | lowercased names, UTF-8               |
+//! | display length   | display names, UTF-8                  |
+//!
+//! The buffers are written as they sit in memory, so saving and loading are
+//! close to a copy. The masks aren't saved: `Index::from_parts` rebuilds them.
 use std::io::{self, BufReader, BufWriter, ErrorKind, Read, Write};
 
 use crate::index::{ENTRY_BYTES, Entry, Index};
@@ -27,8 +27,8 @@ const MAGIC: &[u8; 8] = b"OXIDEXIX";
 const VERSION: u32 = 1;
 const HEADER_BYTES: usize = 24;
 
-// Writes `index` in the format above. An index too large for the format's
-// 32-bit lengths is an `InvalidInput` error.
+/// Writes `index` in the format above. An index too large for the format's
+/// 32-bit lengths is an `InvalidInput` error.
 pub fn write_to(index: &Index, out: impl Write) -> io::Result<()> {
     let (names, display_names, entries) = index.parts();
     let mut out = BufWriter::new(out);
@@ -51,9 +51,9 @@ pub fn write_to(index: &Index, out: impl Write) -> io::Result<()> {
     out.flush()
 }
 
-// Reads what `write_to` wrote. A file cut short is an `UnexpectedEof` error;
-// a wrong magic or version, or any part that doesn't check out, is
-// `InvalidData`.
+/// Reads what `write_to` wrote. A file cut short is an `UnexpectedEof` error;
+/// a wrong magic or version, or any part that doesn't check out, is
+/// `InvalidData`.
 pub fn read_from(input: impl Read) -> io::Result<Index> {
     let mut input = BufReader::new(input);
     let mut header = [0; HEADER_BYTES];
