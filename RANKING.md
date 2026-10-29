@@ -9,7 +9,9 @@ real use.
 
 Each search directory has its own `Index`, so search takes `&[Index]` and
 identifies a result as (index number, entry id). Directories nested inside
-another listed directory are dropped, so no file is indexed twice.
+another listed directory are dropped, so no file is indexed twice
+(`walk::distinct_roots`). Each folder is made canonical first, and nesting
+is checked by whole path components, so `/a/xy` isn't inside `/a/x`.
 
 ## Order
 
@@ -40,8 +42,13 @@ jumping, below.
   - Folder parts match in order, but not necessarily as direct parents:
     `docs/notes` finds `docs/old/notes.txt`, and `a/b/x` needs `b` inside
     `a`.
-  - Empty parts are ignored (`/notes`, `docs//notes`). An empty file part
-    (`docs/`) returns nothing for now.
+  - Empty parts are ignored (`/notes`, `docs//notes`), and so are `.` and
+    `~` (`./src/x`, `~/projects/x`). An empty file part (`docs/`) returns
+    nothing for now.
+  - A root is matched by its last part, like any folder. Folder parts left
+    over at the root are matched against the folders in the root's own
+    path, so a pasted full path works: `/home/me/projects/src/x` with the
+    root `/home/me/projects`.
   - Folders are only checked after the file part matches, so path mode
     costs nothing for names that don't.
 - Queries of 1–2 characters only match exactly or as a prefix. Almost
@@ -65,12 +72,19 @@ jumping, below.
   ran when the first found fewer than `limit` hits, but on a real index
   scattered subsequence matches nearly always fill `limit`, so typos were
   never found.
-- **Open history** is searched with every tier, including Levenshtein,
-  even when earlier tiers already return many results. It's small, so this
-  is cheap.
-- For history entries, typos match while typing: the query is compared
-  against the start of the stem (prefix edit distance), so `slar` matches
-  `slack`.
+- **Opened files** (history) are matched first, in their own phase, by
+  `match_history` in `matching.rs`. The full scan then skips them, so each
+  appears once. History is small, so it gets two extras that would cost
+  too much on every name:
+  - **Typos while typing:** if the name doesn't already match in the
+    exact, prefix or typo tier, the query is compared against each start
+    of the stem within `max_edits` of its own length (prefix edit
+    distance), with the usual edit allowance. So `slar` finds `slack` and
+    `the binding of iscac` finds `The Binding of Isaac Rebirth.url`. A hit
+    goes in the Levenshtein tier, so it beats a subsequence match.
+  - **Tier jumping**, below.
+  - History has its own mask filter, `may_match_history`, which allows up
+    to 2 missing characters, the most a jump can use.
 
 ## Match quality
 
@@ -95,21 +109,43 @@ either.
   subsequence could match the first byte of one character and the second
   byte of another.
 - No accent folding: `cafe` doesn't match `café`.
+- Names and queries are lowercased the same way (`index::fold_case`).
+  Greek final sigma `ς` is folded to `σ`, because plain lowercasing turns
+  a word-final `Σ` into `ς` and any other `Σ` into `σ`. Without this, the
+  query `ΟΔΟΣ` wouldn't be a prefix of `ΟΔΟΣΤΡΩΜΑ`.
 
 ## Scoring signals
 
 ### Frecency
 
-Oxidex keeps its own history of files opened through search.
+Oxidex keeps its own history of files opened through search
+(`History` in `history.rs`).
 
 - Each open adds +1.
 - At most one open counts per 12 hours.
 - The score halves every 7 days.
+- A last count in the future (a wrong clock) is moved back to now at the
+  next open. Otherwise it would block every open until the real clock
+  caught up.
+- The `Frecency` scorer gives 25 points per open, decayed, up to 100.
+
+The frontend owns the `History`, and core never picks a file location:
+
+1. At startup it loads the history with `History::read_from`.
+2. It calls `resolve` after every walk, and after each `record_open`.
+3. It saves with `write_to` whenever it likes.
+
+The format is JSON (`{"records": [...]}`). History records paths, because
+they last across walks. `resolve` maps them to this walk's entry IDs in one
+pass per index, about 5 ms on 61k entries.
 
 ### Modified time
 
-Files never opened through Oxidex fall back to their modified time, so
-newer files rank higher.
+Newer files rank higher: up to 50 points, halving every 30 days. This
+applies to opened files too, with frecency added on top.
+
+It used to be a fallback for files never opened. But one open is worth 25
+points, so opening a recently modified file lowered its rank.
 
 Access time (atime) was rejected as a signal. It's unreliable: Linux
 `relatime`, lazy or system-managed updates on NTFS, and reads by antivirus
@@ -131,6 +167,11 @@ A file can only jump tiers when:
 - the query is 3+ characters, and
 - the name's stem is within 1 edit of the query (2 edits for stems of 8+
   characters).
+
+A jumped hit goes in the Exact tier with quality `1000 / edits`, so with
+its frecency boost it ranks above a stem match nobody opens (900). The
+thresholds are `JUMP_FRECENCY` and `MAX_JUMP_EDITS` in `matching.rs`.
+They're guesses until there's real history to tune them on.
 
 ## Streaming
 
@@ -204,7 +245,7 @@ shouldn't touch the rest of the search code.
   one obvious place.
 - Adding a signal means writing a new implementation and registering it.
 
-The plan, in `src/score.rs`:
+In `oxidex-core/src/score.rs`:
 
 ```rust
 // Everything a scorer may look at for one matched entry. New fields can be
@@ -213,9 +254,9 @@ pub struct Candidate<'a> {
     pub index: &'a Index,
     pub id: u32,
     pub tier: Tier,
-    pub quality: i32,                       // from the matcher
-    pub history: Option<&'a HistoryRecord>, // added in step 10
-    pub now: u64,                           // passed in so tests are deterministic
+    pub quality: i32,                 // from the matcher
+    pub history: Option<&'a Record>,  // if the user has opened it
+    pub now: u64,                     // passed in so tests are deterministic
 }
 
 pub trait Scorer: Send + Sync {
@@ -244,16 +285,16 @@ complicated.
 
 ## TODO
 
-- **Typos in a partly typed name lose every result.** `the binding of isc`
+- **Typos in a partly typed name lose every result**, except for opened
+  files, which get this through `match_history`. `the binding of isc`
   finds `The Binding of Isaac Rebirth.url` as a subsequence match, but one
   more wrong letter (`the binding of iscac`, 1 edit from `isaac`) finds
   nothing. It's no longer a subsequence, and the typo check only compares
   against the whole name or stem: 28 characters against the query's 20, far
-  over the 2-edit limit on length alone. Likely fix: also compare against
-  the start of the name (prefix edit distance), as planned for history
-  entries. Typo matching then works while the name is still being typed.
-  The mask filter stays valid, because each missing character still costs
-  at least one edit.
+  over the 2-edit limit on length alone. Likely fix: the same prefix edit
+  distance history uses, for every name, once a benchmark shows it's
+  affordable on the full scan. The mask filter stays valid, because each
+  missing character still costs at least one edit.
 
 - **Multi-word search.** fzf-style, where `foo bar` matches names
   containing both words in any order. Until then, spaces are literal.
@@ -279,9 +320,9 @@ One commit each, about 200 lines or fewer, each building and passing tests:
 9. ~~The previous-query cache.~~ Deferred, see "Previous-query cache".
 10. **Done.** A command-line search (`src/main.rs`), to try search on real
     folders.
-11. History and frecency, including tier jumping.
+11. **Done.** History and frecency, including tier jumping.
 
-Streaming and the search thread come once the app crate exists. History
-storage is decided when we reach it. The walk skips the contents of folders
+Streaming and the search thread come once the app crate exists. History is
+stored by the frontend, as above. The walk skips the contents of folders
 like `.git` and `node_modules` (the fixed `SKIP_DIRS` list in `walk.rs`),
 but still indexes the folder itself.

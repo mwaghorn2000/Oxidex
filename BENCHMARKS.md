@@ -266,6 +266,78 @@ modified-time scorers. Both run on every match, through
 The folder check adds 0–0.6 ms. `search.rs` is slow on its own: at 9
 characters it allows 2 typos, and the edit-distance tables are the cost.
 
+## History
+
+Measured on `/home/mwagh` (61k entries), using the machine from "Skipped
+folders" (Intel Core Ultra 5 226V, WSL2, ext4, 8 workers). The history had
+502 records spread evenly through the index, all resolved. These were
+measured with throwaway examples that weren't committed.
+
+### `resolve`
+
+Median 5.1 ms for 502 records. It does one pass per index: a hash lookup
+per name, and a full path built only for names that match a record. It
+grows with index size, so it should be about 45 ms at 545k entries. It
+runs after a walk or an open, never per search.
+
+### Search with history
+
+Best of 160 runs each, on a quiet machine.
+
+| Query | Empty history | 502 records |
+|---|---|---|
+| `a` | 737 µs | 811 µs |
+| `re` | 318 µs | 349 µs |
+| `readme` | 443 µs | 522 µs |
+| `raedme` | 473 µs | 560 µs |
+| `docs/notes` | 533 µs | 560 µs |
+| `zzqxj` | 58 µs | 60 µs |
+| `thebindingofisaac` | 94 µs | 100 µs |
+
+An empty history costs nothing against search before history (best of 8:
+`a` 804 against 808 µs). With 502 records:
+
+- Long or rare queries are within noise. `may_match_history` rules out
+  most records.
+- Short, match-heavy queries pay 30–90 µs. Nearly every record passes the
+  looser filter, at about 160 ns each for `match_history`.
+
+Two earlier versions were slower and were changed:
+
+- A binary search in the full scan to skip phase 1's entries doubled `a`
+  (0.8 → 1.6 ms). It was replaced with a cursor that moves forward through
+  the sorted `resolved` list, at one comparison per entry.
+- With no mask filter on history, `zzqxj` took 140 µs and
+  `thebindingofisaac` 309 µs.
+
+### Repeated letters
+
+`Query::lacking` skips names that have fewer copies of a repeated query
+letter than the edit allowance can make up. Best of 6, against the build
+just before it. The "after" build is `main` with the history work merged
+too.
+
+| Query | Before | After |
+|---|---|---|
+| `readme` | 514 µs | 475 µs |
+| `bookkeeper` | 329 µs | 283 µs |
+| `......` | 3.6 ms | 1.9 ms |
+| `eeeeeeee` | 9.9 ms | 9.0 ms |
+| `aaaa` | 7.8 ms | 8.5 ms |
+| `12345678` | 7.8 ms | 8.3 ms |
+
+The first version counted with `str::matches` and made every query with a
+repeated letter slower: `readme` went from 456 to 681 µs. Counting bytes
+fixed that.
+
+`aaaa` isn't slow because of the filter. It really does match 31k of the
+61k names as a subsequence (`install from source with thread parameter`
+has four `a`s in order), and scoring that many takes about 7 ms. Making it
+fast means changing what counts as a subsequence match, which is left for
+the ranking-design pass. `12345678` has no repeated letters, so it isn't
+affected. At 8 characters it allows 2 edits, so every name with at least
+six of those eight digits gets past the mask filter.
+
 ## store
 
 ```sh
